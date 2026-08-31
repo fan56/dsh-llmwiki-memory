@@ -18,6 +18,7 @@ import {
   appendFile,
   access,
 } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { constants as FsConstants } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -379,6 +380,18 @@ export class BundleStore {
   async getConflicts(): Promise<Set<string>> {
     try {
       const raw = await readFile(this.conflictsPath(), 'utf8')
+      const parsed: unknown = JSON.parse(raw)
+      if (Array.isArray(parsed)) return new Set(parsed.filter((x): x is string => typeof x === 'string').map((p) => okf.pathToSlug(p)))
+    } catch {
+      // absent = no conflicts
+    }
+    return new Set()
+  }
+
+  /** Sync variant for the injection hot path. */
+  getConflictsSync(): Set<string> {
+    try {
+      const raw = readFileSync(this.conflictsPath(), 'utf8')
       const parsed: unknown = JSON.parse(raw)
       if (Array.isArray(parsed)) return new Set(parsed.filter((x): x is string => typeof x === 'string').map((p) => okf.pathToSlug(p)))
     } catch {

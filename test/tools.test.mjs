@@ -100,3 +100,24 @@ test('tool topic_history: traces conclusion changes via git', async (t) => {
   assert.match(out.entries[2].conclusion, /第一版结论/)
   assert.match(out.entries[0].conclusion, /第三版结论/)
 })
+
+test('retrieveSync: same-turn hot path is synchronous and logs fire-and-forget', async (t) => {
+  const { service, cleanup } = tmpService()
+  t.after(cleanup)
+  await service.store.ensure()
+  await service.saveTopic({ title: 'Echo Marker QX7QZ', conclusion: 'The Echo Marker QX7QZ topic exists.' })
+  // No await anywhere: the digest must be ready in the SAME tick (chancelu
+  // lesson — an async retrieval always loses the prompt-assembly race).
+  const r = service.retrieveSync('关于 echo marker 的疑问')
+  assert.ok(r.text.includes('Echo Marker QX7QZ'), r.text)
+  assert.ok(r.outcome.hits.some((h) => h.slug === 'echo-marker-qx7qz'))
+  // Zero-hit query → empty text (零注入).
+  const miss = service.retrieveSync('完全无关的火锅菜谱问题')
+  assert.equal(miss.text, '')
+  // Log record lands asynchronously but eventually.
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const records = await service.store.readInjectionRecords()
+  assert.equal(records.length, 2)
+  assert.equal(records[0].injected, true)
+  assert.equal(records[1].injected, false)
+})
