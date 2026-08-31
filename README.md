@@ -1,8 +1,44 @@
 # dsh-llmwiki-memory
 
-一个 dsh 插件：把「工作 topic 记忆」维护成 OKF 标准（Open Knowledge Format v0.2）知识 bundle，持久化在 GitHub 私有仓库，本地缓存，git 历史可追溯，自动观察会话并在每轮对话前向模型注入相关 Topic。
+一个 dsh 插件：把「工作 topic 记忆」维护成 [OKF 标准（Open Knowledge Format v0.2）](https://github.com/GoogleCloudPlatform/open-knowledge-format)的知识 bundle，持久化在本地 git 仓库（可选同步到 GitHub 私有仓库），利用 git 历史提供结论可追溯性，自动观察会话沉淀知识，并在每轮对话前向模型注入相关 Topic。
 
-> 🚧 设计进行中（grill 阶段），本文档随后续开发补全。
+## 它解决什么问题
+
+长会话会失忆，跨会话更会。本插件维护一份**结构化的 topic 记忆**：每个 Topic 记录一件事的**名字、依赖、未决问题、目前结论、影响、建议**。结论变了就改文件、打 commit——`git log` 直接回答「这个结论什么时候、被谁、为什么改的」。
+
+## 核心特性
+
+- **OKF v0.2 严格合规**：每个 Topic 是 `markdown + YAML frontmatter` 的 concept 文档（`type: Topic`），可被 Obsidian、OKF 校验器等整个生态直接消费；自带 provenance（`sources`）、trust（`generated`/`verified`）、lifecycle（`status`/`stale_after`）三族字段。
+- **git 可追溯**：一次结论变更 = 一个 commit（写穿）；`topic_history` 工具和 `/wiki history` 把变更史工具化。
+- **local-first**：默认 local-only 模式（`~/.dsh/llmwiki/`），零配置零凭据；配置 `repo` 后启用 GitHub 同步（单库单 Bundle 单 main，写穿 + 去抖推送，rebase 冲突标记降权等人解，不做自动智能合并）。
+- **免 LLM 热路径注入**：每轮输入做词法匹配（CJK bigram + 词 + tag 加权 + `depends` 图游走），毫秒级；无命中零注入；per-topic 摘要 ≤300 token、top-K ≤4、总预算 ≤1.5k token，全部可配。
+- **注入可观测可调参**：每轮落 Injection Log（命中、得分、near-miss、预算占用），`/wiki stats` 给出 hit rate、top-N、near-miss 分布和阈值调参建议——调参看证据，不拍脑袋。
+- **两段式观察（M2）**：主模型用 `topic_observe` 随手记原子观察，后台蒸馏 lane（session end + 每 N 轮，模型可配）把观察批量蒸馏成正式 Topic；主模型认为值得记时直接 `topic_save`。
+
+## 工具与命令
+
+| 模型工具 | 用途 |
+|---|---|
+| `topic_save` | 沉淀/修订一个 Topic（名字/依赖/未决问题/结论/影响/建议） |
+| `topic_observe` | 随手记一条原子观察（decision/finding/constraint/question），等蒸馏 |
+| `topic_search` | 免 LLM 关键词检索记忆 |
+| `topic_history` | 某 Topic 的结论变更史（git log 工具化） |
+
+| 命令 | 用途 |
+|---|---|
+| `/wiki status` | bundle 健康：topic 数、观察积压、冲突、同步状态 |
+| `/wiki stats` | 注入统计：hit rate、top-N、near-miss 分布与调参建议 |
+| `/wiki list` / `show` / `history` | 浏览 Topic 与变更史 |
+| `/wiki sync [pull\|push]` | GitHub 模式手动同步 |
+| `/wiki config` / `set <key> <value>` | 查看与修改配置（阈值、预算、蒸馏模型等） |
+
+## 安装
+
+```bash
+dsh plugin --profile <你的profile> add @aiwayds/dsh-llmwiki-memory
+```
+
+Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。GitHub 同步：`/wiki set repo <owner/name>`，凭据走 `$GITHUB_TOKEN` 或已登录的 gh CLI（登录不是本插件职责）。
 
 ## Acknowledgements
 
@@ -12,6 +48,12 @@
 - **[GoogleCloudPlatform/open-knowledge-format](https://github.com/GoogleCloudPlatform/open-knowledge-format)** — Open Knowledge Format (OKF) v0.2 规范，本项目 Bundle 格式严格遵循的标准。
 - **[Karpathy 的 LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)** — 整个 LLM 维护个人知识库方法论 的起点。
 - **[fan56/pi-topic-memory](https://github.com/fan56/pi-topic-memory)** — 同作者的前作：pi 上的工作 topic 台账与静默注入扩展，其热路径免 LLM 匹配与注入时序经验是本项目的直接技术前身。
+- **[chancelu/dsh-llmwiki](https://github.com/chancelu/dsh-llmwiki)** — dsh 生态的同类先例，本项目的同轮注入 seam（`agent/inbox/spliced` + `systemPrompt.context()`）沿用了它在真实 dsh 上验证过的机制。
+
+## 设计文档
+
+- [CONTEXT.md](CONTEXT.md) — 领域术语表
+- [docs/adr/](docs/adr/) — 0001–0008：OKF 合规、Remote 形态、同步策略、两段式 Observer、Bundle 布局、注入默认值、可观测与调参、双模式持久化
 
 ## License
 

@@ -1,0 +1,138 @@
+# Release: publish to npm + create the GitHub Release when a v* tag is
+# pushed. Same hardened shape as the ecosystem template (dsh-cron):
+# gates before publish, idempotent publish, `npm view` as the only accepted
+# proof, release job never repeats the publish.
+#
+# NOTE: no npm --provenance — provenance requires a PUBLIC repo; this repo is
+# private for now. Re-add the OIDC flag (and `id-token: write`) when/if the
+# repo goes public.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Gate, Smoke & Publish
+    if: github.repository == 'fan56/dsh-llmwiki-memory'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install dsh CLI (runtime-resolved latest, never hand-pinned)
+        run: |
+          DSH_VERSION="$(npm view @deepseek-ai/dsh version)"
+          echo "dsh closure: ${DSH_VERSION}"
+          npm install -g "@deepseek-ai/dsh@${DSH_VERSION}" --no-audit --no-fund
+
+      - name: Build & Check (tsc)
+        run: npm run build && npm run check
+
+      - name: Test (unit suite)
+        run: npm test
+
+      - name: Boot smoke (real dsh host, scratch profile)
+        run: node scripts/smoke-boot.mjs
+
+      - name: Stamp package.json to the tag version
+        # The tag is the single source of truth for what gets published
+        # (small patches skip the version-bump commit — push the fix, tag it).
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          npm version "${TAG_VERSION}" --no-git-tag-version --allow-same-version
+          echo "publishing @aiwayds/dsh-llmwiki-memory@${TAG_VERSION} (tag ${GITHUB_REF_NAME})"
+
+      - name: Publish to npm
+        # Idempotent: skip when the version is already on the registry, and
+        # treat npm's known lost-response failure (PUT lands, follow-up
+        # errors 403/404) as "let the verify step decide".
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "@aiwayds/dsh-llmwiki-memory@${TAG_VERSION}" version >/dev/null 2>&1; then
+            echo "::warning::@aiwayds/dsh-llmwiki-memory@${TAG_VERSION} is already on npm — skipping publish"
+            exit 0
+          fi
+          set +e
+          PUB_OUT="$(npm publish --access public 2>&1)"
+          PUB_RC=$?
+          set -e
+          printf '%s\n' "$PUB_OUT"
+          if [ "${PUB_RC}" -ne 0 ] && printf '%s' "$PUB_OUT" | grep -qiE "cannot publish over the previously published versions|E404|E403"; then
+            echo "::warning::publish errored but may have landed (npm's known lost-response mode) — the verify step decides"
+            exit 0
+          fi
+          exit "${PUB_RC}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Verify the publish actually landed
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          for attempt in 1 2 3 4 5 6; do
+            if npm view "@aiwayds/dsh-llmwiki-memory@${TAG_VERSION}" version >/dev/null 2>&1; then
+              echo "verified: @aiwayds/dsh-llmwiki-memory@${TAG_VERSION} is visible on the registry (attempt ${attempt})"
+              exit 0
+            fi
+            echo "attempt ${attempt}: not visible yet; waiting 5s"
+            sleep 5
+          done
+          echo "::error::publish reported success but npm view never saw @aiwayds/dsh-llmwiki-memory@${TAG_VERSION} — inspect the registry manually before trusting this release"
+          exit 1
+
+  release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read tag message
+        id: tag_message
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo 'BODY<<EOF_TAG_MESSAGE'
+            git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG"
+            echo 'EOF_TAG_MESSAGE'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check if GitHub Release already exists
+        id: check_release
+        env:
+          TAG: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub Release $TAG already exists — skipping (preserving existing body)"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        if: steps.check_release.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          body: ${{ steps.tag_message.outputs.BODY }}

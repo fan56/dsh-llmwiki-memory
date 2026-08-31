@@ -46,6 +46,11 @@ RUN DSH_VER="${DSH_VERSION:-$(npm view @deepseek-ai/dsh version)}" \
       "@deepseek-ai/dsh@${DSH_VER}" \
  && dsh --version || true
 
+# Scenarios pin companion @deepseek-ai packages (dsh-headless, dsh-llm-replay)
+# to the SAME closure as the global CLI — their bare latest tags can point at
+# an old line with unpublished deps (the 30-headless-injection lesson).
+ENV DSH_VERSION=${DSH_VERSION}
+
 WORKDIR /app
 
 # Build the plugin from source and pack the user-facing tarball into /dist.

@@ -16,8 +16,28 @@ export DSH_HOME=/root/.dsh-e2e
 P="$DSH_HOME/profiles/e2e"
 
 echo '==> adding headless app + replay LLM to the profile'
-dsh plugin --profile e2e add @deepseek-ai/dsh-headless
-dsh plugin --profile e2e add @deepseek-ai/dsh-llm-replay
+# Pin to the same closure as the global dsh CLI (ENV DSH_VERSION from the
+# image); bare latest can resolve to an old line with unpublished deps.
+: "${DSH_VERSION:=$(npm view @deepseek-ai/dsh version)}"
+echo "closure: ${DSH_VERSION}"
+dsh plugin --profile e2e add "@deepseek-ai/dsh-headless@${DSH_VERSION}"
+dsh plugin --profile e2e add "@deepseek-ai/dsh-llm-replay@${DSH_VERSION}"
+
+# dsh-llm-replay declares no dsh.bundle — mount it through the profile's own
+# patch layer WITH its replay-only provider catalog, so the agent's
+# `replay/replay-1` route dispatches through the replay adapter (keyless).
+cat > "$P/cordis.patch.yml" <<'EOF'
+# user patch layer: mount the keyless replay LLM for the e2e turn
+- insert:
+    - id: llm-replay
+      name: '@deepseek-ai/dsh-llm-replay'
+      config:
+        providers:
+          - id: replay
+            name: Replay
+            models:
+              - id: replay-1
+EOF
 
 # Default model route — the replay catch-all intercepts llm/stream before any
 # provider I/O, so arbitrary route ids are fine.
@@ -65,6 +85,8 @@ cat > "$F/session.jsonl" <<EOF
 {"type":"assistant/chunk","seq":1,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
 {"type":"assistant/chunk","seq":2,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"text-delta","index":0,"text":"ECHOED:{{fromRequest:Marker [A-Z0-9]+}}"}}}
 {"type":"assistant/chunk","seq":3,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"ECHOED:{{fromRequest:Marker [A-Z0-9]+}}"}}}}
+{"type":"assistant/chunk","seq":4,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"reasoningTokens":0}}}}
+{"type":"assistant/chunk","seq":5,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
 EOF
 
 export DSH_SNAPSHOT_FILE="$F/session.jsonl"
