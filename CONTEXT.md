@@ -1,0 +1,65 @@
+# dsh-llmwiki-github
+
+一个 dsh 插件：把「工作 topic 记忆」维护成 OKF 标准（Open Knowledge Format v0.2）的知识 bundle，持久化在 GitHub 私有仓库，本地缓存，利用 git 历史提供结论可追溯性，并在每轮对话前向模型注入相关 Topic。
+
+## Language
+
+### 载体
+
+**Bundle**：
+一个 OKF 知识束——Topic 文档加自动生成索引文件构成的目录树，是分发与持久化的完整单元。
+_Avoid_: vault（与 dsh-vault 插件的加密备份语义冲突）、knowledge base
+
+**Remote**：
+存放 Bundle 的 GitHub 私有仓库，是 Bundle 的权威副本。
+_Avoid_: vault、backup repo
+
+**Cache**：
+Bundle 在本地的 git 工作副本，插件的全部读写都发生在 Cache，按同步策略与 Remote 交换。
+_Avoid_: local copy、workspace
+
+### 记忆单元
+
+**Topic**：
+一个记忆单元，对应一个 `type: Topic` 的 OKF concept 文档，回答「关于某件事我们知道什么」。
+_Avoid_: entry、note、memory item
+
+**Topic Profile**：
+本插件在 OKF 之上的扩展约定：Topic 的固定 frontmatter 扩展键（`depends`、`open_questions`、`impact`）与约定正文标题（`# Conclusion`、`# Recommendations`）。
+_Avoid_: schema、dialect
+
+### Topic 字段
+
+**Name**：
+Topic 的人类可读名，落为 frontmatter `title` 与文件名 slug；Name 不可变，改名即新建 Topic。
+_Avoid_: 标题、subject
+
+**Depends**：
+本 Topic 依赖的其他 Topic 列表（frontmatter `depends`，存 Bundle 相对路径），表达「理解本 Topic 的前提」。
+_Avoid_: 依赖树、related（related 走正文 markdown 链接，不占字段）
+
+**Open Questions**：
+尚未有结论的问题列表（frontmatter `open_questions`），是 Observer 持续关注的缺口。
+_Avoid_: TODO、unknowns
+
+**Conclusion**：
+目前的有效结论（正文 `# Conclusion`，配 frontmatter `status` 与 `generated`/`verified`），历史版本由 git 追溯。
+_Avoid_: summary、findings
+
+**Impact**：
+该结论影响的面（frontmatter `impact`：受影响的 Topic、项目、决策）。
+_Avoid_: consequences、side effects
+
+**Recommendations**：
+基于结论的可执行建议（正文 `# Recommendations`）。
+_Avoid_: suggestions、next steps
+
+### 过程角色
+
+**Observer**：
+自动观察会话、分析总结、把新知识写成或更新 Topic 的机制（具体形态待定）。
+_Avoid_: watcher、recorder
+
+**Injection**：
+每轮对话前把相关 Topic 的精炼内容注入模型请求的机制。
+_Avoid_: context injection、inject
