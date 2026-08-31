@@ -138,7 +138,9 @@ export function scoreTopic(
     score += boost
     reasons.push(`tag-boost:+${boost.toFixed(2)}`)
   }
-  if (cfg.recencyWindowDays > 0) {
+  // Recency is a tiebreaker among relevant topics, never a free pass: only
+  // fires when the query already matched some content above.
+  if (score > 0 && cfg.recencyWindowDays > 0) {
     const generated = Date.parse(topic.generatedAt)
     if (!Number.isNaN(generated)) {
       const ageDays = ((cfg.now?.getTime() ?? Date.now()) - generated) / 86_400_000

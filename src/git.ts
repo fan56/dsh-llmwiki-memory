@@ -151,10 +151,11 @@ export interface PullOutcome {
 /**
  * `pull --rebase` with conflict containment: on conflict we abort the rebase
  * (ADR 0003 — no automatic smart merging) and report the conflicted paths so
- * the caller can mark those topics.
+ * the caller can mark those topics. Remote and branch are explicit — the
+ * bundle never depends on upstream tracking config.
  */
-export async function pullRebase(cwd: string, token?: string): Promise<PullOutcome> {
-  const r = await runGit(['pull', '--rebase', '--autostash'], { cwd, token, mayFail: true, timeoutMs: 60_000 }).catch((e) => {
+export async function pullRebase(cwd: string, token?: string, remote = 'origin', branch = 'main'): Promise<PullOutcome> {
+  const r = await runGit(['pull', '--rebase', '--autostash', remote, branch], { cwd, token, mayFail: true, timeoutMs: 60_000 }).catch((e) => {
     return { code: -1, stdout: '', stderr: String(e instanceof Error ? e.message : e) } satisfies GitResult
   })
   if (r.code === 0) return { ok: true, conflicted: [], output: r.stdout + r.stderr }
@@ -199,4 +200,10 @@ export async function unpushedCount(cwd: string, remote = 'origin', branch = 'ma
   const r = await runGit(['rev-list', '--count', `${remote}/${branch}..${branch}`], { cwd, mayFail: true }).catch(() => undefined)
   if (r === undefined || r.code !== 0) return 0
   return Number(r.stdout.trim()) || 0
+}
+
+/** True when the remote advertises the branch — empty remotes skip the pull step. */
+export async function remoteBranchExists(cwd: string, token?: string, remote = 'origin', branch = 'main'): Promise<boolean> {
+  const r = await runGit(['ls-remote', '--heads', remote, branch], { cwd, token, mayFail: true, timeoutMs: 60_000 }).catch(() => undefined)
+  return r !== undefined && r.code === 0 && r.stdout.trim() !== ''
 }

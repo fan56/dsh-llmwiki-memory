@@ -346,10 +346,11 @@ export class BundleStore {
     } catch {
       return
     }
-    // ~512KB cap; keep the most recent half when exceeded.
+    // ~512KB cap; keep the most recent quarter when exceeded (headroom for
+    // the next debounce window before the next compaction).
     if (size <= 512 * 1024) return
     const lines = (await readFile(file, 'utf8')).split('\n').filter((l) => l.trim() !== '')
-    await atomicWrite(file, lines.slice(-lines.length / 2).map((l) => `${l}\n`).join(''))
+    await atomicWrite(file, lines.slice(-Math.max(1, Math.floor(lines.length / 4))).map((l) => `${l}\n`).join(''))
   }
 
   async readInjectionRecords(limit = 2000): Promise<InjectionRecord[]> {

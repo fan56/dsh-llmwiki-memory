@@ -160,8 +160,8 @@ async function renderHistory(service: WikiService, slug: string | undefined): Pr
 }
 
 async function doSync(service: WikiService, direction: string | undefined): Promise<CommandResult> {
-  if (service.sync === undefined) return fail('同步层未就绪')
   if (!service.githubMode) return fail('当前是 local-only 模式（/wiki set repo <owner/name> 启用 GitHub 同步）')
+  if (service.sync === undefined) return fail('同步层未就绪')
   if (direction === undefined || direction === 'push') {
     await service.sync.commitMeta()
     const r = await service.sync.flush()
@@ -175,10 +175,15 @@ async function doSync(service: WikiService, direction: string | undefined): Prom
   return fail('用法：/wiki sync [pull|push]')
 }
 
+/** CamelCase → dash-display: matchThreshold → match-threshold. */
+function displayKey(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()
+}
+
 function renderConfig(cfg: LlmwikiConfigValue): string {
   const lines = ['当前配置：']
   for (const key of CONFIG_KEYS) {
-    lines.push(`  ${key.toLowerCase().replace(/_/g, '-')} = ${String(cfg[key])}`)
+    lines.push(`  ${displayKey(key)} = ${String(cfg[key])}`)
   }
   return lines.join('\n')
 }
@@ -190,13 +195,14 @@ async function doSet(
 ): Promise<CommandResult> {
   const [rawKey = '', ...valueParts] = tokens
   const rawValue = valueParts.join(' ').trim()
-  const key = rawKey.toLowerCase().replace(/-/g, '') as ConfigKey
-  if (!(CONFIG_KEYS as readonly string[]).includes(key)) {
-    return fail(`未知配置项 “${rawKey}”。可选：${CONFIG_KEYS.map((k) => k.toLowerCase().replace(/_/g, '-')).join('、')}`)
+  const normalized = rawKey.toLowerCase().replace(/[-_]/g, '')
+  const key = CONFIG_KEYS.find((k) => k.toLowerCase() === normalized)
+  if (key === undefined) {
+    return fail(`未知配置项 “${rawKey}”。可选：${CONFIG_KEYS.map(displayKey).join('、')}`)
   }
   const parsed = parseConfigValue(key, rawValue)
   if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) return fail(parsed.error)
   await mutate([{ op: 'set', path: [key], value: parsed }])
   if (key === 'repo' || key === 'autoInject') service.invalidate()
-  return ok(`✅ llmwiki.${key} = ${String(parsed)}`)
+  return ok(`✅ llmwiki.${displayKey(key)} = ${String(parsed)}`)
 }
