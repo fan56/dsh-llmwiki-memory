@@ -24,6 +24,11 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "files": [
     "lib",
     "cordis.patch.yml",
