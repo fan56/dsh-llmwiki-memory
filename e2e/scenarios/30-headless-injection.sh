@@ -83,8 +83,8 @@ TS=$(date +%s000)
 cat > "$F/session.jsonl" <<EOF
 {"type":"session","version":0,"id":"fixture-echo-1","createdAt":$TS,"cwd":"/tmp","delegationDepth":0}
 {"type":"assistant/chunk","seq":1,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
-{"type":"assistant/chunk","seq":2,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"text-delta","index":0,"text":"ECHOED:{{fromRequest:Marker [A-Z0-9]+}}"}}}
-{"type":"assistant/chunk","seq":3,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"ECHOED:{{fromRequest:Marker [A-Z0-9]+}}"}}}}
+{"type":"assistant/chunk","seq":2,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"text-delta","index":0,"text":"ECHOED:{{fromRequest:Marker ([A-Z0-9]+)}}"}}}
+{"type":"assistant/chunk","seq":3,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"ECHOED:{{fromRequest:Marker ([A-Z0-9]+)}}"}}}}
 {"type":"assistant/chunk","seq":4,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"reasoningTokens":0}}}}
 {"type":"assistant/chunk","seq":5,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
 EOF
