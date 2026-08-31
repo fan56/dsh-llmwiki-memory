@@ -271,6 +271,47 @@ export function isIsoInstant(s: string): boolean {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)
 }
 
+const WIKILINK = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g
+const MD_LINK = /\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
+
+/**
+ * Normalize one link target to a topic slug, or undefined when the target is
+ * not a bundle-internal topic reference. Accepts `slug`, `slug.md`,
+ * `topics/slug`, `[[slug#heading]]`, `[[slug|alias]]`.
+ */
+export function normalizeLinkTarget(target: string): string | undefined {
+  let t = target.trim()
+  if (t === '' || t.includes('://') || t.startsWith('#') || t.startsWith('mailto:')) return undefined
+  t = t.split('#')[0].trim()
+  if (t === '') return undefined
+  if (t.endsWith('.md')) t = t.slice(0, -3)
+  if (t.startsWith('./')) t = t.slice(2)
+  if (t.startsWith('topics/')) t = t.slice('topics/'.length)
+  if (t === '' || t.includes('/') || t.includes(':')) return undefined
+  if (RESERVED_FILES.has(`${t}.md`)) return undefined
+  return t
+}
+
+/**
+ * Topic slugs referenced from a body: `[[wikilinks]]` (with optional
+ * `#heading` / `|alias`) plus markdown links pointing at bundle paths.
+ * These are the human-authored edges alongside `depends` — both feed the
+ * retrieval graph walk and the backlinks index.
+ */
+export function bodyLinkSlugs(body: string): string[] {
+  const out = new Set<string>()
+  for (const m of body.matchAll(WIKILINK)) {
+    const slug = normalizeLinkTarget(m[1])
+    if (slug !== undefined) out.add(slug)
+  }
+  for (const m of body.matchAll(MD_LINK)) {
+    const slug = normalizeLinkTarget(m[1])
+    if (slug !== undefined) out.add(slug)
+  }
+  out.delete('')
+  return [...out]
+}
+
 /** The conventional profile headings, for validators and tooling. */
 export const CONCLUSION_HEADING = 'Conclusion'
 export const RECOMMENDATIONS_HEADING = 'Recommendations'

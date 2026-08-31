@@ -160,6 +160,35 @@ test('store: conflicts set/clear with slug normalization', async () => {
   }
 })
 
+test('store: backlinks index — depends + body links, regenerated on write', async () => {
+  const { store, cleanup } = tmpStore()
+  try {
+    await store.ensure()
+    await store.saveTopic(
+      { slug: 'base', doc: doc('Base', '# Conclusion\n\n见 [[consumer]] 与 [面板](topics/panel.md)。') },
+      { message: 'c1' },
+    )
+    await store.saveTopic(
+      { slug: 'consumer', doc: { ...doc('Consumer'), fm: { ...doc('Consumer').fm, depends: ['topics/base.md'] } } },
+      { message: 'c2' },
+    )
+    await store.saveTopic({ slug: 'panel', doc: doc('Panel') }, { message: 'c3' })
+    const bl = await store.readBacklinks()
+    assert.deepEqual(bl['base'], [{ slug: 'consumer', via: 'depends' }])
+    // [[consumer]] in base's body → consumer gets a link backlink from base
+    const consumerRefs = bl['consumer'] ?? []
+    assert.ok(consumerRefs.some((e) => e.slug === 'base' && e.via === 'link'), JSON.stringify(bl))
+    assert.deepEqual(bl['panel'], [{ slug: 'base', via: 'link' }])
+    // rewriting base without links drops the stale edge (write-through)
+    await store.saveTopic({ slug: 'base', doc: doc('Base', '# Conclusion\n\n没有引用了。') }, { message: 'c4', created: false })
+    const bl2 = await store.readBacklinks()
+    assert.equal((bl2['consumer'] ?? []).length, 0)
+    assert.equal(bl2['panel'], undefined)
+  } finally {
+    cleanup()
+  }
+})
+
 test('store: readTopic rejects reserved filenames', async () => {
   const { store, cleanup } = tmpStore()
   try {

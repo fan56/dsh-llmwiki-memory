@@ -278,6 +278,54 @@ export class BundleStore {
       tags: m.tags,
     }))
     await atomicWrite(join(this.root, 'index.md'), okf.renderIndex(entries))
+    await atomicWrite(join(this.metaDir(), 'backlinks.json'), `${JSON.stringify(await this.computeBacklinks(), null, 2)}\n`)
+  }
+
+  /**
+   * Reverse-reference index: slug → who references it and how (`depends`
+   * edges + body links). Regenerated on every topic write (ADR 0003
+   * write-through), so it never drifts from the files.
+   */
+  private async computeBacklinks(): Promise<Record<string, { slug: string; via: 'depends' | 'link' }[]>> {
+    const backlinks: Record<string, { slug: string; via: 'depends' | 'link' }[]> = {}
+    const push = (target: string, from: string, via: 'depends' | 'link'): void => {
+      if (target === from) return
+      const list = backlinks[target] ?? []
+      if (!list.some((e) => e.slug === from && e.via === via)) list.push({ slug: from, via })
+      backlinks[target] = list
+    }
+    let files: string[]
+    try {
+      files = await readdir(this.topicsDir())
+    } catch {
+      return {}
+    }
+    for (const f of files) {
+      if (!f.endsWith('.md') || f === 'index.md') continue
+      const slug = f.slice(0, -3)
+      try {
+        const doc = okf.parseTopicDoc(await readFile(join(this.topicsDir(), f), 'utf8'))
+        for (const dep of okf.dependsSlugs(doc.fm)) push(dep, slug, 'depends')
+        for (const link of okf.bodyLinkSlugs(doc.body)) push(link, slug, 'link')
+      } catch {
+        // broken files contribute no edges
+      }
+    }
+    return backlinks
+  }
+
+  /** Read the generated backlinks index (empty map when absent). */
+  async readBacklinks(): Promise<Record<string, { slug: string; via: 'depends' | 'link' }[]>> {
+    try {
+      const raw = await readFile(join(this.metaDir(), 'backlinks.json'), 'utf8')
+      const parsed: unknown = JSON.parse(raw)
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, { slug: string; via: 'depends' | 'link' }[]>
+      }
+    } catch {
+      // absent = no backlinks computed yet
+    }
+    return {}
   }
 
   // ------------------------------------------------------------------

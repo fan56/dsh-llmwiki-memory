@@ -96,6 +96,28 @@ test('command: history works on git-backed bundle', async () => {
   }
 })
 
+test('command: show renders backlinks section when referenced', async () => {
+  const { service, mutate, cleanup } = makeService()
+  try {
+    await service.store.ensure()
+    // base links OUT to ref-topic and panel → those two have backlinks.
+    await service.saveTopic({ title: 'base topic', conclusion: '见 [[ref-topic]] 与 [面板](topics/panel.md)。' })
+    await service.saveTopic({ title: 'ref topic', conclusion: '被 base 引用', slug: 'ref-topic' })
+    await service.saveTopic({ title: 'panel', conclusion: '被 base 引用', slug: 'panel' })
+    const cmd = buildWikiCommand(service, mutate)
+    const showRef = await cmd.handler(inv('show ref-topic'))
+    assert.match(showRef.text, /反向引用/)
+    assert.match(showRef.text, /base-topic（链接）/)
+    const showPanel = await cmd.handler(inv('show panel'))
+    assert.match(showPanel.text, /base-topic（链接）/)
+    // base itself references out but is referenced by nobody → no section.
+    const showBase = await cmd.handler(inv('show base-topic'))
+    assert.doesNotMatch(showBase.text, /反向引用/)
+  } finally {
+    cleanup()
+  }
+})
+
 test('command: sync refuses in local-only mode', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
