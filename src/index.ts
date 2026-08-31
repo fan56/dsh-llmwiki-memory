@@ -170,6 +170,16 @@ export function apply(ctx: Context): void {
       if (!splice.removedCount || splice.outcome === 'canceled') return
       const agent = agents()?.get(session.id)
       if (agent === undefined) return
+      // The agent-scoped context carries the llm instance this agent's own
+      // loop streams through (adapters included) — capture it while alive.
+      try {
+        const candidate = (agent as unknown as { ctx?: Record<string, unknown> }).ctx?.llm as
+          | { stream(options: unknown): AsyncIterable<unknown> }
+          | undefined
+        if (candidate !== undefined && typeof candidate.stream === 'function') llmRef.scoped = candidate
+      } catch {
+        // scope already unwinding — the root fallback stays
+      }
       const list = ((splice.target ?? 'next-turn') === 'next-step' ? agent.inbox.nextStep : agent.inbox.nextTurn) as readonly UserMessageLike[]
       // Live dispatch precedes projection mutation: read the pre-splice window.
       const claimed = list.slice(splice.start, splice.start + splice.removedCount)
