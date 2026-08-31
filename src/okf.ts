@@ -1,0 +1,276 @@
+/**
+ * OKF v0.2 concept-document model for the Topic profile (ADR 0001).
+ *
+ * A Topic is a markdown file with YAML frontmatter plus a body. The Topic
+ * profile fixes the extension keys (`depends`, `open_questions`, `impact`)
+ * and the conventional body headings (`# Conclusion`, `# Recommendations`);
+ * the OKF provenance/trust/lifecycle families pass through untouched.
+ *
+ * `depends` entries are bundle-relative paths (`topics/<slug>.md`) so the
+ * file stays OKF-conformant and cross-linkable; graph helpers convert
+ * between paths and slugs (ADR 0005).
+ *
+ * @module okf
+ */
+
+import { parseYaml, stringifyYaml, YamlError } from './yaml.ts'
+
+export type TopicStatus = 'draft' | 'stable' | 'deprecated'
+
+export interface SourceEntry {
+  id?: string
+  resource: string
+  title?: string
+  author?: string
+  usage_count?: number
+  last_modified?: string
+}
+
+export interface TrustStamp {
+  by: string
+  at: string
+}
+
+export interface TopicFrontmatter {
+  type: string
+  title: string
+  description?: string
+  tags: string[]
+  /** Bundle-relative paths: `topics/<slug>.md`. */
+  depends: string[]
+  open_questions: string[]
+  impact: string[]
+  status: TopicStatus
+  generated: TrustStamp
+  verified?: TrustStamp
+  stale_after?: string
+  sources?: SourceEntry[]
+  /** Producer-defined extras — preserved on round-trip per OKF §4.1. */
+  [extra: string]: unknown
+}
+
+export interface TopicDoc {
+  fm: TopicFrontmatter
+  body: string
+}
+
+export class OkfError extends Error {
+  override name = 'OkfError'
+}
+
+/** Filenames with defined meaning in a bundle; never usable as topic slugs. */
+export const RESERVED_FILES: ReadonlySet<string> = new Set(['index.md', 'spec.md'])
+
+const PROFILE_HEADINGS = ['conclusion', 'recommendations'] as const
+
+function asStringArray(v: unknown): string[] {
+  if (v === undefined || v === null) return []
+  if (!Array.isArray(v)) throw new OkfError('expected a list')
+  return v.map((x) => {
+    if (typeof x !== 'string') throw new OkfError('list entries must be strings')
+    return x
+  })
+}
+
+function asTrust(v: unknown, field: string): TrustStamp {
+  if (v === null || v === undefined || typeof v !== 'object') {
+    throw new OkfError(`frontmatter.${field} must be an object {by, at}`)
+  }
+  const o = v as Record<string, unknown>
+  if (typeof o.by !== 'string' || o.by === '' || typeof o.at !== 'string' || o.at === '') {
+    throw new OkfError(`frontmatter.${field} requires string "by" and "at"`)
+  }
+  return { by: o.by, at: o.at }
+}
+
+function asStatus(v: unknown): TopicStatus {
+  if (v === undefined || v === null || v === '') return 'draft'
+  if (v === 'draft' || v === 'stable' || v === 'deprecated') return v
+  throw new OkfError(`frontmatter.status must be draft|stable|deprecated, got "${String(v)}"`)
+}
+
+/**
+ * Parse a Topic document. Throws OkfError on structural violations
+ * (missing frontmatter, non-mapping, missing type/title).
+ */
+export function parseTopicDoc(raw: string): TopicDoc {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(raw)
+  if (m === null) throw new OkfError('document must start with a --- frontmatter block')
+  let fmRaw: Record<string, unknown>
+  try {
+    fmRaw = parseYaml(m[1])
+  } catch (e) {
+    if (e instanceof YamlError) throw new OkfError(`frontmatter: ${e.message}`)
+    throw e
+  }
+  if (typeof fmRaw.type !== 'string' || fmRaw.type === '') {
+    throw new OkfError('frontmatter.type is required (OKF §4.1)')
+  }
+  const title = typeof fmRaw.title === 'string' && fmRaw.title !== '' ? fmRaw.title : fmRaw.type
+  const tags = asStringArray(fmRaw.tags)
+  const depends = asStringArray(fmRaw.depends)
+  const open_questions = asStringArray(fmRaw.open_questions)
+  const impact = asStringArray(fmRaw.impact)
+  const generated = 'generated' in fmRaw ? asTrust(fmRaw.generated, 'generated') : { by: 'unknown', at: new Date(0).toISOString() }
+  const fm: TopicFrontmatter = {
+    type: fmRaw.type,
+    title,
+    tags,
+    depends,
+    open_questions,
+    impact,
+    status: asStatus(fmRaw.status),
+    generated,
+  }
+  if (typeof fmRaw.description === 'string' && fmRaw.description !== '') fm.description = fmRaw.description
+  if ('verified' in fmRaw && fmRaw.verified !== null && fmRaw.verified !== undefined) fm.verified = asTrust(fmRaw.verified, 'verified')
+  if (typeof fmRaw.stale_after === 'string' && fmRaw.stale_after !== '') fm.stale_after = fmRaw.stale_after
+  if (Array.isArray(fmRaw.sources)) {
+    fm.sources = fmRaw.sources.map((s) => {
+      if (s === null || typeof s !== 'object' || typeof (s as Record<string, unknown>).resource !== 'string') {
+        throw new OkfError('frontmatter.sources entries require a string "resource" (OKF §5.1)')
+      }
+      return s as SourceEntry
+    })
+  }
+  // Preserve unknown producer-defined keys verbatim (OKF §4.1 extensions).
+  const known = new Set(['type', 'title', 'description', 'tags', 'depends', 'open_questions', 'impact', 'status', 'generated', 'verified', 'stale_after', 'sources'])
+  for (const [k, v] of Object.entries(fmRaw)) {
+    if (!known.has(k)) fm[k] = v
+  }
+  return { fm, body: m[2] }
+}
+
+/** Serialize a Topic document with a deterministic frontmatter field order. */
+export function serializeTopicDoc(doc: TopicDoc): string {
+  const fm = doc.fm
+  const out: Record<string, unknown> = {
+    type: fm.type,
+    title: fm.title,
+  }
+  if (fm.description !== undefined) out.description = fm.description
+  out.tags = fm.tags
+  out.depends = fm.depends
+  out.open_questions = fm.open_questions
+  out.impact = fm.impact
+  out.status = fm.status
+  out.generated = { by: fm.generated.by, at: fm.generated.at }
+  if (fm.verified !== undefined) out.verified = { by: fm.verified.by, at: fm.verified.at }
+  if (fm.stale_after !== undefined) out.stale_after = fm.stale_after
+  if (fm.sources !== undefined && fm.sources.length > 0) out.sources = fm.sources
+  for (const [k, v] of Object.entries(fm)) {
+    if (!(k in out)) out[k] = v
+  }
+  return `---\n${stringifyYaml(out)}---\n${doc.body}`
+}
+
+/** Split a body into `# Heading` sections: [{heading, text}] in order. */
+export function splitSections(body: string): { heading: string; text: string }[] {
+  const sections: { heading: string; text: string }[] = []
+  let current: { heading: string; text: string[] } | undefined
+  for (const line of body.split('\n')) {
+    const m = /^# (.+)$/.exec(line)
+    if (m !== null) {
+      if (current !== undefined) sections.push({ heading: current.heading, text: current.text.join('\n').trim() })
+      current = { heading: m[1].trim(), text: [] }
+    } else if (current !== undefined) {
+      current.text.push(line)
+    }
+  }
+  if (current !== undefined) sections.push({ heading: current.heading, text: current.text.join('\n').trim() })
+  return sections
+}
+
+/** The text under a given `# Heading`, or undefined when absent. */
+export function sectionOf(body: string, heading: string): string | undefined {
+  const hit = splitSections(body).find((s) => s.heading.toLowerCase() === heading.toLowerCase())
+  return hit === undefined ? undefined : hit.text
+}
+
+/** First non-empty line of a text block — the 结论精句 used in digests. */
+export function firstParagraph(text: string): string {
+  for (const line of text.split('\n')) {
+    const t = line.trim()
+    if (t !== '') return t
+  }
+  return ''
+}
+
+/** Replace or append a `# Heading` section, preserving other content and order. */
+export function setSection(body: string, heading: string, text: string): string {
+  const sections = splitSections(body)
+  const idx = sections.findIndex((s) => s.heading.toLowerCase() === heading.toLowerCase())
+  if (idx >= 0) {
+    sections[idx] = { heading: sections[idx].heading, text }
+  } else {
+    sections.push({ heading, text })
+  }
+  return sections.map((s) => `# ${s.heading}\n\n${s.text}`).join('\n\n') + '\n'
+}
+
+/**
+ * Slug from a title: latin lowercased, CJK preserved, spaces/punctuation
+ * collapse to dashes. Never empty (falls back to `topic`) and never a
+ * reserved filename.
+ */
+export function slugify(title: string): string {
+  const slug = title
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^\p{Script=Latin}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Cyrillic}\p{Nd}-]/gu, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+    .replace(/-+$/g, '')
+  if (slug === '' || RESERVED_FILES.has(`${slug}.md`)) return 'topic'
+  return slug
+}
+
+/** `topics/foo.md` → `foo`; anything else unchanged. */
+export function pathToSlug(path: string): string {
+  const m = /^topics\/(.+)\.md$/.exec(path)
+  return m === null ? path : m[1]
+}
+
+/** `foo` → `topics/foo.md`. */
+export function slugToPath(slug: string): string {
+  return `topics/${slug}.md`
+}
+
+/** Bundle-relative paths of `depends` entries that point at topics. */
+export function dependsSlugs(fm: { depends: readonly string[] }): string[] {
+  return fm.depends.map(pathToSlug)
+}
+
+export interface IndexEntry {
+  slug: string
+  title: string
+  description?: string
+  status: TopicStatus
+  tags: string[]
+}
+
+/** Render the auto-generated OKF `index.md` (progressive disclosure, §Bundle). */
+export function renderIndex(entries: IndexEntry[]): string {
+  const lines = [
+    '# Topic Index',
+    '',
+    `Auto-generated by dsh-llmwiki-memory — do not edit. ${entries.length} topic${entries.length === 1 ? '' : 's'}.`,
+    '',
+  ]
+  for (const e of entries.sort((a, b) => a.slug.localeCompare(b.slug))) {
+    const desc = e.description !== undefined && e.description !== '' ? ` — ${e.description}` : ''
+    lines.push(`- [${e.title}](topics/${e.slug}.md) \`${e.status}\`${desc}`)
+  }
+  return lines.join('\n') + '\n'
+}
+
+/** Loose ISO-8601 instant check (OKF requires explicit UTC offsets in spec, kept tolerant). */
+export function isIsoInstant(s: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)
+}
+
+/** The conventional profile headings, for validators and tooling. */
+export const CONCLUSION_HEADING = 'Conclusion'
+export const RECOMMENDATIONS_HEADING = 'Recommendations'
