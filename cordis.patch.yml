@@ -1,0 +1,8 @@
+# dsh-llmwiki-memory bundle patch: mounts the plugin into the profile's
+# assembly tree under the stable plugin id `dsh-llmwiki-memory`. It registers
+# the `llmwiki` settings namespace, the topic tools, the /wiki slash command,
+# and the session-event observer (injection + two-stage observation).
+
+- insert:
+    - id: dsh-llmwiki-memory
+      name: '@aiwayds/dsh-llmwiki-memory'
