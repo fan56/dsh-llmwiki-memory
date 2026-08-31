@@ -1,0 +1,61 @@
+# e2e image: Ubuntu 24.04 + Node 22 + a global dsh install + the plugin
+# tarball built from THIS source tree.
+#
+# The base image is pulled through the DaoCloud mirror because
+# registry-1.docker.io is not reachable from the dev machine's podman VM
+# (DNS-poisoned). On a network where docker.io works, drop the
+# "docker.m.daocloud.io/" prefix.
+FROM docker.m.daocloud.io/library/ubuntu:24.04
+
+ARG NODE_VERSION=22.23.2
+# npmmirror's binary mirror is the default: nodejs.org's CDN is not
+# reachable from this network's podman VM. On a clean network:
+# --build-arg NODE_DIST_BASE=https://nodejs.org/dist
+ARG NODE_DIST_BASE=https://npmmirror.com/mirrors/node
+ARG PNPM_VERSION=10.33.0
+# The dsh CLI version is resolved at build time from the npm registry's
+# latest tag when not provided (no hand-pinned rc — the rc.8 lesson).
+ARG DSH_VERSION=
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm-256color
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl xz-utils git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Node from the official dist tarball — no apt repository dependency,
+# arch-agnostic (x64 / arm64).
+RUN case "$(uname -m)" in \
+      x86_64)  NODE_ARCH=x64 ;; \
+      aarch64) NODE_ARCH=arm64 ;; \
+      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL \
+      "${NODE_DIST_BASE}/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+      | tar -xJ -C /usr/local --strip-components=1 \
+ && node --version
+
+# pnpm + the dsh CLI (version resolved from the registry when the ARG is
+# empty). The global dsh install is what the scenarios boot against.
+RUN DSH_VER="${DSH_VERSION:-$(npm view @deepseek-ai/dsh version)}" \
+ && echo "installing @deepseek-ai/dsh@${DSH_VER}" \
+ && npm install -g --no-fund --no-audit \
+      pnpm@${PNPM_VERSION} \
+      "@deepseek-ai/dsh@${DSH_VER}" \
+ && dsh --version || true
+
+WORKDIR /app
+
+# Build the plugin from source and pack the user-facing tarball into /dist.
+COPY . .
+RUN npm install --no-fund --no-audit \
+ && npm run build \
+ && npm pack \
+ && mkdir -p /dist && mv *.tgz /dist/ \
+ && ls -la /dist/
+
+# The scenario suite is bind-mounted at /e2e by e2e/run-e2e.sh so test logic
+# can iterate without an image rebuild.
+CMD ["bash", "/e2e/scenarios/run-all.sh"]
