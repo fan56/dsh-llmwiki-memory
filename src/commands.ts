@@ -8,7 +8,7 @@
 
 import type { CommandDefinition, CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { WikiService } from './service.ts'
-import { serializeTopicDoc } from './okf.ts'
+import { serializeTopicDoc, slugify } from './okf.ts'
 import { CONFIG_KEYS, type ConfigKey, type LlmwikiConfigValue, parseConfigValue } from './config.ts'
 import { aggregateStats } from './ilog.ts'
 
@@ -144,7 +144,18 @@ async function renderShow(service: WikiService, slug: string | undefined): Promi
   if (slug === undefined || slug === '') return fail('用法：/wiki show <slug>')
   const doc = await service.store.readTopic(slug)
   if (doc === undefined) return fail(`Topic “${slug}” 不存在（/wiki list 查看）`)
-  return ok(serializeTopicDoc(doc))
+  const text = serializeTopicDoc(doc)
+  const backlinks = await service.store.readBacklinks()
+  const refs = backlinks[slugify(slug)] ?? []
+  if (refs.length === 0) return ok(text)
+  const VIA_LABEL: Record<'depends' | 'link', string> = { depends: '依赖', link: '链接' }
+  const lines = [
+    text,
+    '---',
+    `反向引用（${refs.length} 条）——改动本条结论时这些 Topic 可能需要跟进：`,
+    ...refs.map((r) => `- ${r.slug}（${VIA_LABEL[r.via]}）`),
+  ]
+  return ok(lines.join('\n'))
 }
 
 async function renderHistory(service: WikiService, slug: string | undefined): Promise<CommandResult> {

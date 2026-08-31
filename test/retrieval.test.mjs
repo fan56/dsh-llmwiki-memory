@@ -74,6 +74,18 @@ test('searchTopics: graph expansion reaches depends neighbors and dependents', (
   assert.ok(out.hits.some((h) => h.slug === 'cron-child' && h.viaGraph))
 })
 
+test('searchTopics: [[wikilink]] body edges also feed the graph walk', () => {
+  const roster = [
+    topic({ slug: 'seed', title: 'dsh 发版流程', tags: ['release'], depends: [], conclusion: 'tag 触发 release。' }),
+    topic({ slug: 'linked-via-wikilink', title: '名字完全不同的主题', tags: ['zzz'], depends: [], conclusion: '被 seed 的正文链接引用。' }),
+  ]
+  // Give seed a body link edge (the roster carries links from bodyLinkSlugs).
+  roster[0].links = ['linked-via-wikilink']
+  const cfg = { threshold: 0.9, topK: 4, tagBoost: 0.15, graphDepth: 1, recencyWindowDays: 0, now: new Date() }
+  const out = searchTopics('dsh 发版流程', roster, cfg)
+  assert.ok(out.hits.some((h) => h.slug === 'linked-via-wikilink' && h.viaGraph), JSON.stringify(out.hits))
+})
+
 test('searchTopics: empty query or roster yields zero rounds', () => {
   const empty = searchTopics('', [topic()], {})
   assert.equal(empty.hits.length, 0)

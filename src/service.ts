@@ -90,6 +90,7 @@ export class WikiService {
         status: doc.fm.status,
         tags: doc.fm.tags,
         depends: doc.fm.depends,
+        links: okf.bodyLinkSlugs(doc.body),
         generatedAt: doc.fm.generated.at,
         conclusion: okf.sectionOf(doc.body, okf.CONCLUSION_HEADING) ?? '',
       })
@@ -243,6 +244,7 @@ export class WikiService {
         status: doc.fm.status,
         tags: doc.fm.tags,
         depends: doc.fm.depends,
+        links: okf.bodyLinkSlugs(doc.body),
         generatedAt: doc.fm.generated.at,
         conclusion: okf.sectionOf(doc.body, okf.CONCLUSION_HEADING) ?? '',
       })

@@ -13,6 +13,7 @@
 - **local-first**：默认 local-only 模式（`~/.dsh/llmwiki/`），零配置零凭据；配置 `repo` 后启用 GitHub 同步（单库单 Bundle 单 main，写穿 + 去抖推送，rebase 冲突标记降权等人解，不做自动智能合并）。
 - **免 LLM 热路径注入**：每轮输入做词法匹配（CJK bigram + 词 + tag 加权 + `depends` 图游走），毫秒级；无命中零注入；per-topic 摘要 ≤300 token、top-K ≤4、总预算 ≤1.5k token，全部可配。
 - **注入可观测可调参**：每轮落 Injection Log（命中、得分、near-miss、预算占用），`/wiki stats` 给出 hit rate、top-N、near-miss 分布和阈值调参建议——调参看证据，不拍脑袋。
+- **知识连接成图**：`depends`（机器可读的有向依赖边）+ 正文 `[[wikilink]]` 与 markdown 链接（人写边）共同构成图；检索命中后沿图双向游走（每层衰减一半、深度可配），一次命中带入一个知识子图；每次写入自动重建 `meta/backlinks.json` 反向引用索引，`/wiki show` 直接列出「谁引用了我、怎么引用的」——改一条结论前先看牵连面。
 - **两段式观察（M2）**：主模型用 `topic_observe` 随手记原子观察，后台蒸馏 lane（session end + 每 N 轮，模型可配）把观察批量蒸馏成正式 Topic；主模型认为值得记时直接 `topic_save`。
 
 ## 工具与命令

@@ -1,5 +1,9 @@
 # Changelog
 
+## 未发布
+
+- 知识连接增强：正文 `[[wikilink]]` 与 markdown 链接解析为图边，参与检索的双向图游走；每次写入自动重建 `meta/backlinks.json`；`/wiki show` 追加「反向引用」段（via depends/link）。
+
 ## 0.1.0 (2026-08-31)
 
 首个里程碑版本：M1 记忆闭环 + M2 自动 Observer。

@@ -18,6 +18,8 @@ import { dependsSlugs } from './okf.ts'
 export interface RetrievableTopic extends TopicMeta {
   /** `# Conclusion` section text (may be empty). */
   conclusion: string
+  /** Body-referenced topic slugs ([[wikilinks]] + markdown links) — graph edges. */
+  links?: string[]
 }
 
 export interface RetrievalConfig {
@@ -173,13 +175,21 @@ export function searchTopics(query: string, roster: readonly RetrievableTopic[],
   const near = scored.filter((s) => s.score < c.threshold && s.score >= c.threshold * 0.5).slice(0, 8)
 
   const hits: SearchHit[] = direct.map((s) => ({ ...s, viaGraph: false }))
-  // Graph expansion (ADR 0005 graph-shaped bundle): walk depends/dependents
-  // from the seeds, include up to the remaining topK slots at decaying score.
+  // Graph expansion (ADR 0005 graph-shaped bundle): walk depends + body
+  // links, both directions, from the seeds; include up to topK+2 slots at
+  // decaying score.
   if (c.graphDepth > 0 && hits.length > 0) {
     const bySlug = new Map(roster.map((r) => [r.slug, r]))
+    const neighborsOf = (slug: string): string[] => {
+      const topic = bySlug.get(slug)
+      if (topic === undefined) return []
+      const out = new Set<string>(dependsSlugs({ depends: topic.depends }))
+      for (const l of topic.links ?? []) out.add(l)
+      return [...out]
+    }
     const dependents = new Map<string, string[]>()
     for (const r of roster) {
-      for (const dep of dependsSlugs({ ...fakeFmFrom(r) })) {
+      for (const dep of new Set([...dependsSlugs({ depends: r.depends }), ...(r.links ?? [])])) {
         const list = dependents.get(dep) ?? []
         list.push(r.slug)
         dependents.set(dep, list)
@@ -190,9 +200,7 @@ export function searchTopics(query: string, roster: readonly RetrievableTopic[],
     for (let depth = 1; depth <= c.graphDepth && frontier.length > 0; depth += 1) {
       const next: { slug: string; score: number }[] = []
       for (const node of frontier) {
-        const topic = bySlug.get(node.slug)
-        const neighbors = new Set<string>(topic === undefined ? [] : dependsSlugs({ ...fakeFmFrom(topic) }))
-        for (const n of dependents.get(node.slug) ?? []) neighbors.add(n)
+        const neighbors = new Set<string>([...neighborsOf(node.slug), ...(dependents.get(node.slug) ?? [])])
         for (const neighbor of neighbors) {
           if (seen.has(neighbor)) continue
           seen.add(neighbor)
@@ -208,11 +216,4 @@ export function searchTopics(query: string, roster: readonly RetrievableTopic[],
     }
   }
   return { hits, nearMisses: near.map((s) => ({ ...s, viaGraph: false })), rosterSize: roster.length }
-}
-
-// Retrieval consumes TopicMeta (store) plus conclusion text; the graph walk
-// needs the depends list, which TopicMeta already carries as bundle paths.
-// This adapter keeps scoreTopic/searchTopics decoupled from the full doc.
-function fakeFmFrom(meta: TopicMeta): { depends: string[] } {
-  return { depends: meta.depends }
 }

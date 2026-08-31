@@ -13,6 +13,8 @@ import {
   dependsSlugs,
   renderIndex,
   RESERVED_FILES,
+  bodyLinkSlugs,
+  normalizeLinkTarget,
   OkfError,
 } from '../lib/okf.js'
 
@@ -106,6 +108,29 @@ test('slug/path helpers', () => {
   assert.equal(pathToSlug('foo'), 'foo')
   assert.equal(slugToPath('foo'), 'topics/foo.md')
   assert.deepEqual(dependsSlugs({ depends: ['topics/a.md', 'topics/b.md'] }), ['a', 'b'])
+})
+
+test('bodyLinkSlugs: wikilinks + markdown links → graph edges', () => {
+  const body = [
+    '见 [[dsh-cron-定时]] 与 [[发版流程|发布前必读]]。',
+    '带标题的 [[dsh-plugin-api#事件模型]] 也算。',
+    '目录限定 [[topics/dsh-dcp]]。',
+    '[发布](发版流程.md) 与 [面板](topics/dsh-cron-panel.md)。',
+    '外链 [ds](https://example.com/x.md) 和 [锚点](#小节) 不算。',
+    '子路径 [x](docs/other.md) 也不算。',
+  ].join('\n')
+  assert.deepEqual(bodyLinkSlugs(body).sort(), ['dsh-cron-panel', 'dsh-cron-定时', 'dsh-dcp', 'dsh-plugin-api', '发版流程'])
+})
+
+test('normalizeLinkTarget: 边界形态', () => {
+  assert.equal(normalizeLinkTarget('foo'), 'foo')
+  assert.equal(normalizeLinkTarget('foo.md'), 'foo')
+  assert.equal(normalizeLinkTarget('topics/foo'), 'foo')
+  assert.equal(normalizeLinkTarget('foo#小节'), 'foo')
+  assert.equal(normalizeLinkTarget('https://x/a.md'), undefined)
+  assert.equal(normalizeLinkTarget('#heading'), undefined)
+  assert.equal(normalizeLinkTarget('a/b.md'), undefined)
+  assert.equal(normalizeLinkTarget('index.md'), undefined)
 })
 
 test('renderIndex: sorted, status, links', () => {
