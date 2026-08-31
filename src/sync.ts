@@ -26,6 +26,7 @@ export interface SyncConfig {
 }
 
 export type TokenResolver = () => Promise<string | undefined>
+export type UrlResolver = (repo: string) => string
 
 export class Sync {
   private timer: NodeJS.Timeout | undefined
@@ -37,11 +38,13 @@ export class Sync {
   private readonly store: BundleStore
   private readonly cfg: () => SyncConfig
   private readonly token: TokenResolver
+  private readonly urlFor: UrlResolver
 
-  constructor(store: BundleStore, cfg: () => SyncConfig, token: TokenResolver = defaultTokenResolver) {
+  constructor(store: BundleStore, cfg: () => SyncConfig, token: TokenResolver = defaultTokenResolver, urlFor: UrlResolver = remoteUrlFor) {
     this.store = store
     this.cfg = cfg
     this.token = token
+    this.urlFor = urlFor
   }
 
   get active(): boolean {
@@ -52,7 +55,11 @@ export class Sync {
   async pull(): Promise<{ ok: boolean; conflicted: string[]; message: string }> {
     if (!this.active) return { ok: true, conflicted: [], message: 'local-only 模式，无同步' }
     const token = await this.safeToken()
-    await gitmod.setRemote(this.store.root, remoteUrlFor(this.cfg().repo))
+    await gitmod.setRemote(this.store.root, this.urlFor(this.cfg().repo))
+    if (!(await gitmod.remoteBranchExists(this.store.root, token))) {
+      this.lastPullAt = new Date().toISOString()
+      return { ok: true, conflicted: [], message: '远端还没有分支，跳过拉取' }
+    }
     const outcome = await gitmod.pullRebase(this.store.root, token)
     this.lastPullAt = new Date().toISOString()
     if (outcome.ok) {
@@ -74,7 +81,7 @@ export class Sync {
     if (!this.active) return
     this.pending = true
     if (this.timer !== undefined) return
-    const seconds = Math.max(5, this.cfg().pushDebounceSeconds)
+    const seconds = Math.max(1, this.cfg().pushDebounceSeconds)
     this.timer = setTimeout(() => {
       this.timer = undefined
       void this.flush()
@@ -94,12 +101,15 @@ export class Sync {
     const run = this.inFlight.then(async () => {
       if (!(await this.store.hasGit())) return { ok: false, message: 'bundle 不是 git 仓库' }
       const token = await this.safeToken()
-      const pre = await gitmod.pullRebase(this.store.root, token)
-      if (!pre.ok) {
-        const conflicted = pre.conflicted.map((p) => p.replace(/^topics\//, '').replace(/\.md$/, ''))
-        if (conflicted.length > 0) await this.store.setConflicts(pre.conflicted)
-        this.lastError = pre.output.slice(-500)
-        return { ok: false, message: `push 前 rebase 失败：${conflicted.join('、') || pre.output.slice(-120)}` }
+      await gitmod.setRemote(this.store.root, this.urlFor(this.cfg().repo))
+      if (await gitmod.remoteBranchExists(this.store.root, token)) {
+        const pre = await gitmod.pullRebase(this.store.root, token)
+        if (!pre.ok) {
+          const conflicted = pre.conflicted.map((p) => p.replace(/^topics\//, '').replace(/\.md$/, ''))
+          if (conflicted.length > 0) await this.store.setConflicts(pre.conflicted)
+          this.lastError = pre.output.slice(-500)
+          return { ok: false, message: `push 前 rebase 失败：${conflicted.join('、') || pre.output.slice(-120)}` }
+        }
       }
       const result = await gitmod.push(this.store.root, token)
       if (result.ok) {

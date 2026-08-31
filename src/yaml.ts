@@ -98,90 +98,105 @@ function parseBlock(lines: Line[], start: number, indent: number): { value: unkn
   if (start >= lines.length) return { value: null, next: start }
   const first = lines[start]
   if (first.text.startsWith('- ') || first.text === '-') {
-    const arr: unknown[] = []
-    let i = start
-    while (i < lines.length && lines[i].indent === indent && (lines[i].text.startsWith('- ') || lines[i].text === '-')) {
-      const rest = lines[i].text === '-' ? '' : lines[i].text.slice(2).trim()
-      if (rest === '') {
-        // Nested block under a bare "-".
-        if (i + 1 < lines.length && lines[i + 1].indent > indent) {
-          const nested = parseBlock(lines, i + 1, lines[i + 1].indent)
-          arr.push(nested.value)
-          i = nested.next
-        } else {
-          arr.push(null)
-          i += 1
-        }
-      } else if (/^["']/.test(rest) || !rest.includes(': ') || (rest.endsWith(':') && !rest.includes(': '))) {
-        if (rest.includes(': ') || rest.endsWith(':')) {
-          // Inline map start inside a sequence item: "- key: value".
-          const { key, value } = splitKeyValue(rest, lines[i].no)
-          const item: Record<string, unknown> = {}
-          if (value === '') {
-            if (i + 1 < lines.length && lines[i + 1].indent > indent) {
-              const nested = parseBlock(lines, i + 1, lines[i + 1].indent)
-              item[key] = nested.value
-              i = nested.next
-            } else {
-              item[key] = null
-              i += 1
-            }
-          } else {
-            item[key] = scalar(value)
-            i += 1
-          }
-          // Continuation keys of the same inline map.
-          while (i < lines.length && lines[i].indent === indent + 2 && !lines[i].text.startsWith('- ')) {
-            const kv = splitKeyValue(lines[i].text, lines[i].no)
-            item[kv.key] = kv.value === '' ? null : scalar(kv.value)
-            i += 1
-          }
-          arr.push(item)
-        } else {
-          arr.push(scalar(rest))
-          i += 1
-        }
-      } else {
-        arr.push(scalar(rest))
-        i += 1
-      }
-    }
-    return { value: arr, next: i }
+    return parseBlockArray(lines, start, indent)
   }
-  const obj: Record<string, unknown> = {}
+  return parseBlockMap(lines, start, indent)
+}
+
+/** Parse a sequence starting at `start`; items are scalars, nested blocks, or inline-key maps. */
+function parseBlockArray(lines: Line[], start: number, indent: number): { value: unknown[]; next: number } {
+  const arr: unknown[] = []
   let i = start
-  while (i < lines.length && lines[i].indent === indent) {
-    const line = lines[i]
-    if (line.text.startsWith('- ')) break
-    const { key, value } = splitKeyValue(line.text, line.no)
-    if (value === '') {
+  while (i < lines.length && lines[i].indent === indent && (lines[i].text.startsWith('- ') || lines[i].text === '-')) {
+    const raw = lines[i].text === '-' ? '' : lines[i].text.slice(2).trim()
+    if (raw === '') {
+      // Bare "-": nested block belongs to this item.
       if (i + 1 < lines.length && lines[i + 1].indent > indent) {
         const nested = parseBlock(lines, i + 1, lines[i + 1].indent)
-        obj[key] = nested.value
+        arr.push(nested.value)
         i = nested.next
       } else {
-        obj[key] = null
+        arr.push(null)
         i += 1
       }
-    } else if (value.startsWith('[') && value.endsWith(']')) {
-      const inner = value.slice(1, -1).trim()
-      obj[key] = inner === '' ? [] : splitInlineItems(inner).map((x) => scalar(x))
-      i += 1
-    } else if (value.startsWith('{') && value.endsWith('}')) {
-      const inner = value.slice(1, -1).trim()
-      const item: Record<string, unknown> = {}
-      if (inner !== '') {
-        for (const pair of splitInlineItems(inner)) {
-          const kv = splitKeyValue(pair, line.no)
-          item[kv.key] = scalar(kv.value)
-        }
-      }
-      obj[key] = item
-      i += 1
-    } else {
-      obj[key] = scalar(value)
-      i += 1
+      continue
     }
+    if (raw.includes(': ') || raw.endsWith(':')) {
+      // Map item: first key inline after "- ", continuation keys at indent+2.
+      const item: Record<string, unknown> = {}
+      const { key, value } = splitKeyValue(raw, lines[i].no)
+      i += 1
+      if (value === '') {
+        if (i < lines.length && lines[i].indent > indent) {
+          const nested = parseBlock(lines, i, lines[i].indent)
+          item[key] = nested.value
+          i = nested.next
+        } else {
+          item[key] = null
+        }
+      } else if (value.startsWith('[') && value.endsWith(']')) {
+        const inner = value.slice(1, -1).trim()
+        item[key] = inner === '' ? [] : splitInlineItems(inner).map((x) => scalar(x))
+      } else if (value.startsWith('{') && value.endsWith('}')) {
+        item[key] = parseInlineMap(value)
+      } else {
+        item[key] = scalar(value)
+      }
+      while (i < lines.length && lines[i].indent === indent + 2 && !lines[i].text.startsWith('- ')) {
+        const consumed = parseMapEntryInto(item, lines, i)
+        i = consumed
+      }
+      arr.push(item)
+      continue
+    }
+    arr.push(scalar(raw))
+    i += 1
+  }
+  return { value: arr, next: i }
+}
+
+function parseInlineMap(value: string): Record<string, unknown> {
+  const inner = value.slice(1, -1).trim()
+  const item: Record<string, unknown> = {}
+  if (inner !== '') {
+    for (const pair of splitInlineItems(inner)) {
+      const kv = splitKeyValue(pair, 0)
+      item[kv.key] = scalar(kv.value)
+    }
+  }
+  return item
+}
+
+/** Parse one `key: value` line into `obj`; returns the next line index. */
+function parseMapEntryInto(obj: Record<string, unknown>, lines: Line[], i: number): number {
+  const { key, value } = splitKeyValue(lines[i].text, lines[i].no)
+  if (value === '') {
+    if (i + 1 < lines.length && lines[i + 1].indent > lines[i].indent) {
+      const nested = parseBlock(lines, i + 1, lines[i + 1].indent)
+      obj[key] = nested.value
+      return nested.next
+    }
+    obj[key] = null
+    return i + 1
+  }
+  if (value.startsWith('[') && value.endsWith(']')) {
+    const inner = value.slice(1, -1).trim()
+    obj[key] = inner === '' ? [] : splitInlineItems(inner).map((x) => scalar(x))
+    return i + 1
+  }
+  if (value.startsWith('{') && value.endsWith('}')) {
+    obj[key] = parseInlineMap(value)
+    return i + 1
+  }
+  obj[key] = scalar(value)
+  return i + 1
+}
+
+function parseBlockMap(lines: Line[], start: number, indent: number): { value: Record<string, unknown>; next: number } {
+  const obj: Record<string, unknown> = {}
+  let i = start
+  while (i < lines.length && lines[i].indent === indent && !lines[i].text.startsWith('- ')) {
+    i = parseMapEntryInto(obj, lines, i)
   }
   return { value: obj, next: i }
 }
