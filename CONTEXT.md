@@ -11,8 +11,12 @@
 _Avoid_: vault（与 dsh-vault 插件的加密备份语义冲突）、knowledge base
 
 **Remote**：
-存放 Bundle 的 GitHub 私有仓库，是 Bundle 的权威副本。
+存放 Bundle 的 GitHub 私有仓库，是 Bundle 的权威副本；可选——配置后才启用 GitHub 同步模式。
 _Avoid_: vault、backup repo
+
+**Local-only**：
+未配置 Remote 时的持久化形态：Bundle 只存在于本地 Cache，本地 git 历史照常，无同步。
+_Avoid_: offline mode、standalone
 
 **Cache**：
 Bundle 在本地的 git 工作副本，插件的全部读写都发生在 Cache，按同步策略与 Remote 交换。
