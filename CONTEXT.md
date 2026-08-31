@@ -1,4 +1,4 @@
-# dsh-llmwiki-github
+# dsh-llmwiki-memory
 
 一个 dsh 插件：把「工作 topic 记忆」维护成 OKF 标准（Open Knowledge Format v0.2）的知识 bundle，持久化在 GitHub 私有仓库，本地缓存，利用 git 历史提供结论可追溯性，并在每轮对话前向模型注入相关 Topic。
 
@@ -57,9 +57,17 @@ _Avoid_: suggestions、next steps
 ### 过程角色
 
 **Observer**：
-自动观察会话、分析总结、把新知识写成或更新 Topic 的机制（具体形态待定）。
+自动观察会话、沉淀知识、写入 Topic 的机制总称，由显式通道与兜底通道两段式组成。
 _Avoid_: watcher、recorder
 
+**Observe**：
+主模型在会话中随手记录的原子观察（一条决策、发现或约束），是 Topic 的原料而非成品，等待蒸馏。
+_Avoid_: capture、note-taking
+
+**Distill**：
+后台 lane 把未蒸馏的 Observe 批量总结成正式 Topic 字段的 LLM 过程，发生在 session end 或每 N 轮。
+_Avoid_: summarize、digest
+
 **Injection**：
-每轮对话前把相关 Topic 的精炼内容注入模型请求的机制。
+每轮对话前把相关 Topic 的精炼内容注入模型请求的机制；注入决策走免 LLM 热路径。
 _Avoid_: context injection、inject
