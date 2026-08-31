@@ -30,6 +30,8 @@ F=/tmp/replay-fixture-distill
 mkdir -p "$F"
 TS=$(date +%s000)
 OPS='{"ops":[{"op":"create","title":"项目优先级：dsh-cron 对比 pi-tui","description":"两条产品线的先后排序","tags":["优先级","dsh"],"depends":[],"open_questions":["外部阻塞何时解除"],"impact":["发布节奏"],"conclusion":"先做 dsh-cron：它有明确的外部依赖窗口，错过就要再等一个周期。","recommendations":"本周内排期 dsh-cron 的窗口适配。","status":"draft"}]}'
+# The image has no python3; quote the ops text with node (always present).
+OPS_TEXT=$(printf '%s' "$OPS" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(s.trim())))')
 cat > "$F/session.jsonl" <<EOF
 {"type":"session","version":0,"id":"fixture-distill-1","createdAt":$TS,"cwd":"/tmp","delegationDepth":0}
 {"type":"assistant/chunk","seq":1,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
@@ -38,8 +40,8 @@ cat > "$F/session.jsonl" <<EOF
 {"type":"assistant/chunk","seq":4,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"reasoningTokens":0}}}}
 {"type":"assistant/chunk","seq":5,"time":$TS,"data":{"turn":1,"step":1,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
 {"type":"assistant/chunk","seq":6,"time":$TS,"data":{"turn":2,"step":1,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
-{"type":"assistant/chunk","seq":7,"time":$TS,"data":{"turn":2,"step":1,"chunk":{"type":"text-delta","index":0,"text":$(printf '%s' "$OPS" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}}}
-{"type":"assistant/chunk","seq":8,"time":$TS,"data":{"turn":2,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":$(printf '%s' "$OPS" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}}}}
+{"type":"assistant/chunk","seq":7,"time":$TS,"data":{"turn":2,"step":1,"chunk":{"type":"text-delta","index":0,"text":$OPS_TEXT}}}
+{"type":"assistant/chunk","seq":8,"time":$TS,"data":{"turn":2,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":$OPS_TEXT}}}}
 {"type":"assistant/chunk","seq":9,"time":$TS,"data":{"turn":2,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":200,"outputTokens":80,"cacheReadTokens":0,"reasoningTokens":0}}}}
 {"type":"assistant/chunk","seq":10,"time":$TS,"data":{"turn":2,"step":1,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
 EOF

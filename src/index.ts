@@ -126,12 +126,20 @@ export function apply(ctx: Context): void {
   for (const tool of buildTopicTools(service)) tools.register(tool)
 
   // ---- Distill lane (M2) ----
-  let llmSeam: { stream(options: unknown): AsyncIterable<unknown> } | undefined
-  ctx.inject(['llm'], (llmCtx) => {
-    llmSeam = (llmCtx as unknown as { llm: { stream(options: unknown): AsyncIterable<unknown> } }).llm
-  })
+  // The llm seam is fetched lazily at call time — a cordis inject callback
+  // may never fire for lazily-created services. The module import is warmed
+  // here so the first distill call in a one-shot session does not race exit.
+  void import('@deepseek-ai/dsh-llm').catch(() => undefined)
   const caller = defaultModelCaller(
-    () => llmSeam,
+    () => {
+      try {
+        return (ctx as unknown as { get(name: string): unknown }).get('llm') as
+          | { stream(options: unknown): AsyncIterable<unknown> }
+          | undefined
+      } catch {
+        return undefined
+      }
+    },
     () => {
       const c = cfgNow()
       return c.distillProvider !== '' && c.distillModel !== '' ? { provider: c.distillProvider, model: c.distillModel } : undefined
