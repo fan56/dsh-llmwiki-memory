@@ -71,3 +71,7 @@ _Avoid_: summarize、digest
 **Injection**：
 每轮对话前把相关 Topic 的精炼内容注入模型请求的机制；注入决策走免 LLM 热路径。
 _Avoid_: context injection、inject
+
+**Injection Log**：
+每轮检索的决策记录：命中 Topic、得分、命中原因、注入与否（含 near-miss）、预算占用；是调参与 stats 聚合的依据。
+_Avoid_: usage log、telemetry
