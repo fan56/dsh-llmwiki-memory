@@ -2,7 +2,9 @@
 
 Status: accepted
 
-Remote 是一个专用 GitHub 私有仓库（默认 `fan56/llmwiki`，插件配置可指向任意 owner/name），仓库内容即一个完整 Bundle，所有机器都在单一 `main` 分支上推拉。
+Remote 是一个专用 GitHub 私有仓库，仓库内容即一个完整 Bundle，所有机器都在单一 `main` 分支上推拉。数据仓库默认名 `dsh-llmwiki-memory`（owner 取当前账号），插件支持用户自定义任意 owner/name。
+
+认证继承 dsh-vault 先例：token 解析 `GITHUB_TOKEN` 环境变量 → `gh auth token`，GitHub 登录不是插件的职责；git 推拉时 token 走每命令 header 注入，不落盘、不进 remote URL。
 
 ## Considered Options
 
@@ -13,4 +15,5 @@ Remote 是一个专用 GitHub 私有仓库（默认 `fan56/llmwiki`，插件配�
 
 - 冲突面天然小（一 Topic 一文件）；真冲突走 rebase + 手工合并，按多机场景从保守设计。
 - 机器身份写进 `generated.by`（`agent:dsh-llmwiki-memory@<host>`），配合 git blame/log 回答「结论何时、被谁、为何改」。
-- 数据仓库与插件仓库（本仓库）分离：插件发版节奏不牵连用户数据。
+- 数据仓库与插件仓库（代码）分离：插件发版节奏不牵连用户数据。
+- 注意：作者本机代码仓库与数据仓库默认名相同（fan56 下不能重名），作者配置里把数据仓库指向自定义名即可——这也正是可配置项存在的理由。
