@@ -50,6 +50,11 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。GitHub �
 - **[fan56/pi-topic-memory](https://github.com/fan56/pi-topic-memory)** — 同作者的前作：pi 上的工作 topic 台账与静默注入扩展，其热路径免 LLM 匹配与注入时序经验是本项目的直接技术前身。
 - **[chancelu/dsh-llmwiki](https://github.com/chancelu/dsh-llmwiki)** — dsh 生态的同类先例，本项目的同轮注入 seam（`agent/inbox/spliced` + `systemPrompt.context()`）沿用了它在真实 dsh 上验证过的机制。
 
+## 已知边界
+
+- **headless 单发会话里的 session-end 蒸馏**：蒸馏 lane 在 turn/end 触发后异步执行，而 headless 进程答完即退，真实模型调用（秒级）大概率输给进程退出。多轮长会话（tui/web）里每 N 轮的蒸馏不受影响；`meta/distill-state.json` 记录每次 lane 的结局，`/wiki status` 可查。
+- **配置读取时机**：`/wiki set` 与 settings.yaml 修改在下次会话启动后生效最稳。
+
 ## 设计文档
 
 - [CONTEXT.md](CONTEXT.md) — 领域术语表
