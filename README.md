@@ -29,7 +29,8 @@
 |---|---|
 | `/wiki status` | bundle 健康：topic 数、观察积压、冲突、同步状态 |
 | `/wiki stats` | 注入统计：hit rate、top-N、near-miss 分布与调参建议 |
-| `/wiki list` / `show` / `history` | 浏览 Topic 与变更史 |
+| `/wiki list` / `show` / `history` | 浏览 Topic、反向引用与变更史 |
+| `/wiki graph` | 生成关系图网页（力导向、可拖拽缩放、悬停看结论）并自动在浏览器打开 |
 | `/wiki sync [pull\|push]` | GitHub 模式手动同步 |
 | `/wiki config` / `set <key> <value>` | 查看与修改配置（阈值、预算、蒸馏模型等） |
 

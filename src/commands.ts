@@ -7,8 +7,12 @@
  */
 
 import type { CommandDefinition, CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
+import { writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { spawn } from 'node:child_process'
 import type { WikiService } from './service.ts'
-import { serializeTopicDoc, slugify } from './okf.ts'
+import { serializeTopicDoc, slugify, firstParagraph } from './okf.ts'
+import { buildGraph, renderGraphHtml } from './viz.ts'
 import { CONFIG_KEYS, type ConfigKey, type LlmwikiConfigValue, parseConfigValue } from './config.ts'
 import { aggregateStats } from './ilog.ts'
 
@@ -17,8 +21,9 @@ export const HELP = [
   '  /wiki status              bundle 健康：topic 数、观察积压、冲突、同步状态',
   '  /wiki stats               注入统计：hit rate、top-N、near-miss 分布与调参建议',
   '  /wiki list                列出全部 Topic',
-  '  /wiki show <slug>         查看一个 Topic 全文',
+  '  /wiki show <slug>         查看一个 Topic 全文（含反向引用）',
   '  /wiki history <slug>      一个 Topic 的结论变更史（git log）',
+  '  /wiki graph               生成关系图网页并在浏览器打开',
   '  /wiki sync [pull|push]    GitHub 模式：手动拉取/推送（默认模式自动）',
   '  /wiki config              查看当前配置',
   '  /wiki set <key> <value>   修改配置；key: ' + CONFIG_KEYS.join(' | '),
@@ -29,8 +34,8 @@ export const HELP = [
 export function buildWikiCommand(service: WikiService, mutate: (ops: readonly { op: 'set'; path: string[]; value: unknown }[]) => Promise<void>): CommandDefinition {
   return {
     name: 'wiki',
-    description: 'OKF topic 记忆：status | stats | list | show | history | sync | config | set',
-    input: { hint: '[status | stats | list | show <slug> | history <slug> | sync [pull|push] | config | set <key> <value>]' },
+    description: 'OKF topic 记忆：status | stats | list | show | history | graph | sync | config | set',
+    input: { hint: '[status | stats | list | show <slug> | history <slug> | graph | sync [pull|push] | config | set <key> <value>]' },
     handler: (invocation) => handle(invocation, service, mutate),
   }
 }
@@ -52,6 +57,8 @@ async function handle(invocation: CommandInvocation, service: WikiService, mutat
         return await renderShow(service, rest[0])
       case 'history':
         return await renderHistory(service, rest[0])
+      case 'graph':
+        return await doGraph(service)
       case 'sync':
         return await doSync(service, rest[0])
       case 'config':
@@ -168,6 +175,41 @@ async function renderHistory(service: WikiService, slug: string | undefined): Pr
     if (e.conclusion !== undefined && e.conclusion !== '') lines.push(`      └ 结论当时：${e.conclusion}`)
   }
   return ok(lines.join('\n'))
+}
+
+/**
+ * /wiki graph — render the bundle's relationship graph into a self-contained
+ * HTML page and open it in the default browser. Set DSH_LLMWIKI_NO_OPEN=1 to
+ * skip the browser launch (tests, headless use).
+ */
+async function doGraph(service: WikiService): Promise<CommandResult> {
+  const roster = await service.roster()
+  if (roster.length === 0) return fail('Bundle 里还没有 Topic，无从画起（先记点什么）')
+  const graph = buildGraph(roster)
+  const conclusions: Record<string, string> = {}
+  for (const topic of roster) {
+    conclusions[topic.slug] = firstParagraph(topic.conclusion)
+  }
+  const html = renderGraphHtml(graph, { conclusions })
+  const file = join(service.store.root, 'meta', 'graph.html')
+  await writeFile(file, html, 'utf8')
+  const opened = openInBrowser(file)
+  const summary = `✅ 关系图已生成：${file}（${graph.nodes.length} 节点 / ${graph.edges.length} 边）` +
+    (opened ? '——已在浏览器打开' : '（浏览器未自动打开，手动用浏览器打开该文件即可）')
+  return ok(summary)
+}
+
+function openInBrowser(file: string): boolean {
+  if (process.env.DSH_LLMWIKI_NO_OPEN === '1') return false
+  try {
+    const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
+    const args = process.platform === 'win32' ? ['/c', 'start', '', file] : [file]
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' })
+    child.unref?.()
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function doSync(service: WikiService, direction: string | undefined): Promise<CommandResult> {
