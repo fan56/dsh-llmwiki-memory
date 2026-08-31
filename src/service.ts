@@ -7,6 +7,7 @@
  */
 
 import { readFile, stat } from 'node:fs/promises'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import * as okf from './okf.ts'
 import { searchTopics, tokenize, type RetrievableTopic, type SearchOutcome } from './retrieval.ts'
@@ -152,6 +153,109 @@ export class WikiService {
     if (inclusionDropped(injection)) record.dropped = injection.dropped
     await this.store.appendInjectionRecord(record)
     return { outcome, injection, recorded: true }
+  }
+
+  /**
+   * SYNCHRONOUS hot path for same-turn injection (the chancelu lesson):
+   * `agent/inbox/spliced` dispatches before prompt assembly and the context
+   * provider reads the assembled text synchronously — an async retrieval
+   * would always lose the race and inject nothing. Reads files with sync fs
+   * behind the mtime cache; the log record is written fire-and-forget.
+   */
+  retrieveSync(query: string, sessionId?: string): { text: string; outcome: SearchOutcome } {
+    const cfg = this.cfg
+    const roster = this.rosterSync()
+    const empty: SearchOutcome = { hits: [], nearMisses: [], rosterSize: roster.length }
+    if (!cfg.autoInject || query.trim() === '' || roster.length === 0) {
+      return { text: '', outcome: empty }
+    }
+    const conflicts = this.store.getConflictsSync()
+    const outcome = searchTopics(query, roster, {
+      threshold: cfg.matchThreshold,
+      topK: cfg.topK,
+      tagBoost: cfg.tagBoost,
+      graphDepth: cfg.graphDepth,
+      recencyWindowDays: cfg.recencyWindowDays,
+      conflicts,
+    })
+    const entries: DigestInput[] = []
+    for (const hit of outcome.hits) {
+      const doc = this.readDocSync(hit.slug)
+      if (doc !== undefined) entries.push({ slug: hit.slug, doc, hit })
+    }
+    const injection = assembleInjection(entries, {
+      perTopicBudget: cfg.perTopicBudget,
+      totalBudget: cfg.totalBudget,
+    })
+    const record: InjectionRecord = {
+      at: new Date().toISOString(),
+      queryTokenCount: tokenize(query).length,
+      querySample: querySample(query),
+      rosterSize: outcome.rosterSize,
+      hits: outcome.hits.map((h) => ({ slug: h.slug, score: h.score, reasons: h.reasons, viaGraph: h.viaGraph })),
+      nearMisses: outcome.nearMisses.map((h) => ({ slug: h.slug, score: h.score })),
+      injected: injection.text !== '',
+      usedTokens: injection.usedTokens,
+    }
+    if (sessionId !== undefined) record.sessionId = sessionId
+    if (injection.text === '' && outcome.hits.length > 0) record.why = 'below-budget-or-dropped'
+    if (injection.dropped.length > 0) record.dropped = injection.dropped
+    void this.store.appendInjectionRecord(record).catch(() => undefined)
+    return { text: injection.text, outcome }
+  }
+
+  /** Sync roster read (same mtime cache as roster()). */
+  rosterSync(): RetrievableTopic[] {
+    let files: string[]
+    try {
+      files = readdirSync(this.store.topicsDir())
+    } catch {
+      return []
+    }
+    const out: RetrievableTopic[] = []
+    for (const file of files) {
+      if (!file.endsWith('.md') || file === 'index.md') continue
+      const path = join(this.store.topicsDir(), file)
+      let st
+      try {
+        st = statSync(path)
+      } catch {
+        continue
+      }
+      const cached = this.cache.get(file)
+      let entry = cached
+      if (cached === undefined || cached.mtimeMs !== st.mtimeMs || cached.size !== st.size) {
+        try {
+          const doc = okf.parseTopicDoc(readFileSync(path, 'utf8'))
+          entry = { mtimeMs: st.mtimeMs, size: st.size, doc, slug: file.slice(0, -3) }
+          this.cache.set(file, entry)
+        } catch {
+          this.cache.delete(file)
+          continue
+        }
+      }
+      if (entry === undefined) continue
+      const doc = entry.doc
+      out.push({
+        slug: entry.slug,
+        title: doc.fm.title,
+        description: doc.fm.description,
+        status: doc.fm.status,
+        tags: doc.fm.tags,
+        depends: doc.fm.depends,
+        generatedAt: doc.fm.generated.at,
+        conclusion: okf.sectionOf(doc.body, okf.CONCLUSION_HEADING) ?? '',
+      })
+    }
+    return out
+  }
+
+  private readDocSync(slug: string): okf.TopicDoc | undefined {
+    try {
+      return okf.parseTopicDoc(readFileSync(join(this.store.topicsDir(), `${slug}.md`), 'utf8'))
+    } catch {
+      return undefined
+    }
   }
 
   private async readDoc(slug: string): Promise<okf.TopicDoc | undefined> {

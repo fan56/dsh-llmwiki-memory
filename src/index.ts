@@ -108,14 +108,17 @@ export function apply(ctx: Context): void {
 
   const agents = () => (ctx as unknown as { agents?: AgentMapLike }).agents
 
+  // SYNCHRONOUS retrieval: the spliced event dispatches before prompt
+  // assembly, and the context() provider reads the assembled digest
+  // synchronously — an async round would always lose this race.
   function retrieveForTurn(sessionId: string, query: string): void {
-    void service
-      .retrieve(query, sessionId)
-      .then((r) => {
-        const state = turns.get(sessionId)
-        if (state !== undefined) state.injectionText = r.injection.text
-      })
-      .catch(() => undefined)
+    try {
+      const state = turns.get(sessionId)
+      if (state === undefined) return
+      state.injectionText = service.retrieveSync(query, sessionId).text
+    } catch {
+      // Contained: a retrieval failure must never break the turn.
+    }
   }
 
   // ---- Tools ----
