@@ -65,7 +65,7 @@ for i in $(seq 1 15); do
   sleep 1
 done
 NOW=$(ls "$B/topics" | wc -l)
-[ "$NOW" -gt "$BEFORE" ] || { echo 'FAIL: distill never created a topic'; ls "$B/topics"; exit 1; }
+[ "$NOW" -gt "$BEFORE" ] || { echo 'FAIL: distill never created a topic'; ls "$B/topics"; echo '--- distill state ---'; cat "$B/meta/distill-state.json" 2>/dev/null || echo '(no state file — the lane never ran)'; exit 1; }
 
 NEW=$(ls -t "$B/topics" | head -1)
 echo "==> new topic: $NEW"

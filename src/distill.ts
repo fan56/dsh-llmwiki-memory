@@ -87,6 +87,23 @@ export class Distiller {
   }
 
   async run(sessionId?: string): Promise<DistillResult> {
+    const result = await this.runInner(sessionId)
+    // Persist the outcome — /wiki status and e2e diagnostics both read it.
+    await this.service.store
+      .writeDistillState({
+        at: new Date().toISOString(),
+        ok: result.ok,
+        reason: result.reason,
+        created: result.created,
+        updated: result.updated,
+        marked: result.marked,
+        detail: result.detail,
+      })
+      .catch(() => undefined)
+    return result
+  }
+
+  private async runInner(sessionId?: string): Promise<DistillResult> {
     if (!this.configured || this.caller === undefined) {
       return { ok: false, reason: 'no-model', created: [], updated: [], marked: 0 }
     }
@@ -233,7 +250,8 @@ export function defaultModelCaller(
   return async (req) => {
     const llm = getLlm()
     const route = getRoute()
-    if (llm === undefined || route === undefined) throw new Error('llm seam or distill route not configured')
+    if (route === undefined) throw new Error('distill route not configured (set distill-provider and distill-model)')
+    if (llm === undefined) throw new Error('llm seam unavailable (ctx.llm missing)')
     const { BlockAssembler, createUserMessage, deepFreeze } = await import('@deepseek-ai/dsh-llm')
     const messages = [
       createUserMessage({

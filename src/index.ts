@@ -29,8 +29,8 @@ import { LlmwikiConfig, type LlmwikiConfigValue } from './config.ts'
 
 export const name = 'dsh-llmwiki-memory'
 
-/** Services consumed at apply time; llm/commands attach via guarded ctx.inject. */
-export const inject = ['systemPrompt', 'tools', 'settings', 'agents']
+/** Services consumed at apply time; llm joins via guarded ctx.inject. */
+export const inject = ['systemPrompt', 'tools', 'settings', 'agents', 'llm']
 
 interface AgentMapLike {
   get(id: unknown): { inbox: { nextTurn: readonly unknown[]; nextStep: readonly unknown[] } } | undefined
@@ -126,20 +126,18 @@ export function apply(ctx: Context): void {
   for (const tool of buildTopicTools(service)) tools.register(tool)
 
   // ---- Distill lane (M2) ----
-  // The llm seam is fetched lazily at call time — a cordis inject callback
-  // may never fire for lazily-created services. The module import is warmed
-  // here so the first distill call in a one-shot session does not race exit.
+  // The llm service is SCOPED per agent: adapters (real or replay) register
+  // on the session-scoped instance, not the root one captured at apply time.
+  // During event dispatch the handler's `this` is the active scoped context —
+  // grab its llm there (while active; after teardown access throws). Fallback
+  // chain: session-scoped capture → apply-time root instance.
+  const llmRef: { scoped?: { stream(options: unknown): AsyncIterable<unknown> }; root?: { stream(options: unknown): AsyncIterable<unknown> } } = {}
+  llmRef.root = (ctx as unknown as Record<string, unknown>).llm as
+    | { stream(options: unknown): AsyncIterable<unknown> }
+    | undefined
   void import('@deepseek-ai/dsh-llm').catch(() => undefined)
   const caller = defaultModelCaller(
-    () => {
-      try {
-        return (ctx as unknown as { get(name: string): unknown }).get('llm') as
-          | { stream(options: unknown): AsyncIterable<unknown> }
-          | undefined
-      } catch {
-        return undefined
-      }
-    },
+    () => llmRef.scoped ?? llmRef.root,
     () => {
       const c = cfgNow()
       return c.distillProvider !== '' && c.distillModel !== '' ? { provider: c.distillProvider, model: c.distillModel } : undefined
@@ -151,9 +149,22 @@ export function apply(ctx: Context): void {
   const observer = new Observer(service, (sessionId, reason) => distiller.request(sessionId, reason))
 
   // ---- Session events: injection + observation ----
-  ctx.on('session/event' as never, ((session: { id: unknown }, event: SessionEvent) => {
-    const sessionId = String(session.id)
-    if (event.type === 'agent/inbox/spliced') {
+  // Regular function on purpose: cordis binds `this` to the active scoped
+  // context during dispatch — the only moment the session-scoped llm service
+  // (with its adapters) is reachable for the distill lane's later use.
+  ctx.on(
+    'session/event' as never,
+    (function (this: unknown, session: { id: unknown }, event: SessionEvent) {
+      const sessionId = String(session.id)
+      try {
+        const candidate = (this as unknown as Record<string, unknown> | undefined)?.llm as
+          | { stream(options: unknown): AsyncIterable<unknown> }
+          | undefined
+        if (candidate !== undefined && typeof candidate.stream === 'function') llmRef.scoped = candidate
+      } catch {
+        // this-binding absent on this host — the apply-time root fallback stays.
+      }
+      if (event.type === 'agent/inbox/spliced') {
       if (!cfgNow().autoInject) return
       const splice = event.data as { target?: string; start: number; removedCount?: number; outcome?: string }
       if (!splice.removedCount || splice.outcome === 'canceled') return
@@ -175,20 +186,21 @@ export function apply(ctx: Context): void {
       turns.set(sessionId, state)
       retrieveForTurn(sessionId, claimedText)
       return
-    }
-    if (event.type === 'turn/start') {
-      turns.delete(sessionId)
-      return
-    }
-    if (event.type === 'turn/end') {
-      const state = turns.get(sessionId)
-      if (state !== undefined) {
-        state.claimedText = ''
-        state.injectionText = ''
       }
-    }
-    observer.onSessionEvent(sessionId, event.type, event.data)
-  }) as never)
+      if (event.type === 'turn/start') {
+        turns.delete(sessionId)
+        return
+      }
+      if (event.type === 'turn/end') {
+        const state = turns.get(sessionId)
+        if (state !== undefined) {
+          state.claimedText = ''
+          state.injectionText = ''
+        }
+      }
+      observer.onSessionEvent(sessionId, event.type, event.data)
+    }) as never,
+  )
 
   // ---- Sync lifecycle: pull on session start, flush on dispose ----
   ctx.on('session/event' as never, ((session: { id: unknown }, event: SessionEvent) => {

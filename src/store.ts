@@ -126,6 +126,24 @@ export class BundleStore {
     return join(this.metaDir(), 'conflicts.json')
   }
 
+  private distillStatePath(): string {
+    return join(this.metaDir(), 'distill-state.json')
+  }
+
+  /** Last distill-lane run outcome (diagnostics for /wiki status and e2e). */
+  async writeDistillState(state: unknown): Promise<void> {
+    await mkdir(this.metaDir(), { recursive: true })
+    await atomicWrite(this.distillStatePath(), `${JSON.stringify(state, null, 2)}\n`)
+  }
+
+  async readDistillState(): Promise<Record<string, unknown> | undefined> {
+    try {
+      return JSON.parse(await readFile(this.distillStatePath(), 'utf8')) as Record<string, unknown>
+    } catch {
+      return undefined
+    }
+  }
+
   /** Create the directory skeleton, git repo, and initial index (idempotent). */
   async ensure(): Promise<void> {
     await mkdir(this.topicsDir(), { recursive: true })
