@@ -74,8 +74,11 @@ python3_check() { :; } # no python in image; assert with grep below
 # served here — @deepseek-ai/dsh-llm-replay registers its adapter on its own
 # plugin scope, which dies with the one-shot session (a real host registers
 # provider adapters globally at boot, so the hop routes there).
+# Two acceptable "lane triggered + attempted" failure texts:
+#   - the raw adapter hop error (adapter registry layer), or
+#   - the pickLiveLlm pre-flight error (route-table probe layer, alpha.4+).
 grep -q '"reason": *"model-error"' "$STATE" \
-  && grep -q 'no adapter registered for provider' "$STATE" \
+  && { grep -q 'no adapter registered for provider' "$STATE" || grep -q '没有匹配的模型路由' "$STATE"; } \
   && { echo "PASS 40-headless-distill: lane triggered + attempted model call in a real process (replay adapter scope documented limitation)"; exit 0; }
 
 # Full pass: if the environment ever serves the call, require a real topic.
