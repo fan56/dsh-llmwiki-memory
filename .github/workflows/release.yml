@@ -88,13 +88,15 @@ jobs:
       - name: Verify the publish actually landed
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          for attempt in 1 2 3 4 5 6; do
+                    # First publish propagates through npm's CDN for minutes; the
+          # 30s window once failed a release that HAD landed. Budget 5 min.
+          for attempt in $(seq 1 30); do
             if npm view "@aiwayds/dsh-llmwiki-memory@${TAG_VERSION}" version >/dev/null 2>&1; then
               echo "verified: @aiwayds/dsh-llmwiki-memory@${TAG_VERSION} is visible on the registry (attempt ${attempt})"
               exit 0
             fi
-            echo "attempt ${attempt}: not visible yet; waiting 5s"
-            sleep 5
+            echo "attempt ${attempt}: not visible yet; waiting 10s"
+            sleep 10
           done
           echo "::error::publish reported success but npm view never saw @aiwayds/dsh-llmwiki-memory@${TAG_VERSION} — inspect the registry manually before trusting this release"
           exit 1
