@@ -36,11 +36,11 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
-      - name: Install dsh CLI (runtime-resolved latest, never hand-pinned)
+      - name: Install dsh CLI (rolling @alpha dist-tag, never hand-pinned)
         run: |
-          DSH_VERSION="$(npm view @deepseek-ai/dsh version)"
+          DSH_VERSION="$(npm view @deepseek-ai/dsh@alpha version)"
           echo "dsh closure: ${DSH_VERSION}"
-          npm install -g "@deepseek-ai/dsh@${DSH_VERSION}" --no-audit --no-fund
+          npm install -g "@deepseek-ai/dsh@alpha" --no-audit --no-fund
 
       - name: Build & Check (tsc)
         run: npm run build && npm run check
