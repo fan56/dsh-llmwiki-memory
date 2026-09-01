@@ -4,7 +4,7 @@
 
 一个 dsh 插件：把「工作 topic 记忆」维护成 [OKF 标准（Open Knowledge Format v0.2）](https://github.com/GoogleCloudPlatform/open-knowledge-format)的知识 bundle，持久化在本地 git 仓库（可选同步到 GitHub 私有仓库），利用 git 历史提供结论可追溯性，自动观察会话沉淀知识，并在每轮对话前向模型注入相关 Topic。
 
-> **Requires dsh >= 0.1.2-alpha.3**（适配 dsh 0.1.2-alpha.3 的 settings 命名空间与 LLM seam；不再兼容 rc 线宿主）。
+> **Requires dsh >= 0.1.2-alpha.4**（适配 dsh 0.1.2-alpha.4 的 settings 命名空间与 LLM seam；不再兼容 rc 线宿主）。
 
 ## 它解决什么问题
 
