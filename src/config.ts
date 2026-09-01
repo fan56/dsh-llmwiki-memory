@@ -81,6 +81,11 @@ export const CONFIG_KEYS = [
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number]
 
+/** CamelCase → dash-display (topK → top-k) for command output. */
+export function displayKey(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()
+}
+
 /** /wiki set <key> <value> — parse the raw string into the typed value. */
 export function parseConfigValue(key: ConfigKey, raw: string): boolean | number | string | { error: string } {
   switch (key) {

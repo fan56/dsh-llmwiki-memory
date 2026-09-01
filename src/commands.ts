@@ -13,11 +13,13 @@ import { spawn } from 'node:child_process'
 import type { WikiService } from './service.ts'
 import { serializeTopicDoc, slugify, firstParagraph } from './okf.ts'
 import { buildGraph, renderGraphHtml } from './viz.ts'
-import { CONFIG_KEYS, type ConfigKey, type LlmwikiConfigValue, parseConfigValue } from './config.ts'
+import { CONFIG_KEYS, displayKey, type ConfigKey, type LlmwikiConfigValue, parseConfigValue } from './config.ts'
 import { aggregateStats } from './ilog.ts'
+import { createOnboardHandler, type MutateFn } from './onboard.ts'
 
 export const HELP = [
   'dsh-llmwiki-memory — OKF topic 记忆（本地 bundle，git 可追溯，可选 GitHub 同步）',
+  '  /wiki onboard             a/b/c 分步配置向导（模式 / 仓库 / 蒸馏 / 注入 / 观察）',
   '  /wiki status              bundle 健康：topic 数、观察积压、冲突、同步状态',
   '  /wiki stats               注入统计：hit rate、top-N、near-miss 分布与调参建议',
   '  /wiki list                列出全部 Topic',
@@ -31,22 +33,25 @@ export const HELP = [
   '凭据：$GITHUB_TOKEN 或已登录的 gh CLI；登录不在本插件职责内。',
 ].join('\n')
 
-export function buildWikiCommand(service: WikiService, mutate: (ops: readonly { op: 'set'; path: string[]; value: unknown }[]) => Promise<void>): CommandDefinition {
+export function buildWikiCommand(service: WikiService, mutate: MutateFn): CommandDefinition {
+  const onboard = createOnboardHandler(service, mutate)
   return {
     name: 'wiki',
-    description: 'OKF topic 记忆：status | stats | list | show | history | graph | sync | config | set',
-    input: { hint: '[status | stats | list | show <slug> | history <slug> | graph | sync [pull|push] | config | set <key> <value>]' },
-    handler: (invocation) => handle(invocation, service, mutate),
+    description: 'OKF topic 记忆：onboard | status | stats | list | show | history | graph | sync | config | set',
+    input: { hint: '[onboard | status | stats | list | show <slug> | history <slug> | graph | sync [pull|push] | config | set <key> <value>]' },
+    handler: (invocation) => handle(invocation, service, mutate, onboard),
   }
 }
 
-async function handle(invocation: CommandInvocation, service: WikiService, mutate: (ops: readonly { op: 'set'; path: string[]; value: unknown }[]) => Promise<void>): Promise<CommandResult> {
+async function handle(invocation: CommandInvocation, service: WikiService, mutate: MutateFn, onboard: (args: string[], invocation: CommandInvocation) => Promise<CommandResult>): Promise<CommandResult> {
   const raw = invocation.rawInput.trim()
   const [action = '', ...rest] = raw.split(/\s+/)
   try {
     switch (action) {
       case '':
         return ok(HELP)
+      case 'onboard':
+        return await onboard(rest, invocation)
       case 'status':
         return ok(await renderStatus(service))
       case 'stats':
@@ -226,11 +231,6 @@ async function doSync(service: WikiService, direction: string | undefined): Prom
     return r.ok ? ok(`✅ ${r.message}`) : fail(r.message)
   }
   return fail('用法：/wiki sync [pull|push]')
-}
-
-/** CamelCase → dash-display: matchThreshold → match-threshold. */
-function displayKey(key: string): string {
-  return key.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()
 }
 
 function renderConfig(cfg: LlmwikiConfigValue): string {

@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- 配置向导：`/wiki onboard` a/b/c 分步引导（存储模式 / GitHub 仓库 / 蒸馏模型 / 注入档位 / 自动观察），一条命令推进一步、全 surface 行为一致，答案末步确认才批量写入 settings，中途 quit 零写入；`gh api` 自动探测登录名建议默认仓。
+- 默认远端仓库名定为 `dsh-wiki-memory`（ADR 0002/0008 文字同步更正）——原来的 `dsh-llmwiki-memory` 与插件源码仓同名，开同步会撞车。
 - 关系可视化：`/wiki graph` 生成自包含 HTML 关系图（手写力导向 SVG、零外部依赖、离线可用）并自动在浏览器打开——状态配色、度数定节点大小、实线 depends/虚线正文链接、拖拽/缩放/平移、悬停高亮邻居与结论详情、搜索与 tag 过滤。
 - 知识连接增强：正文 `[[wikilink]]` 与 markdown 链接解析为图边，参与检索的双向图游走；每次写入自动重建 `meta/backlinks.json`；`/wiki show` 追加「反向引用」段（via depends/link）。
 
