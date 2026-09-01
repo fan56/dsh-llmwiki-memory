@@ -27,6 +27,7 @@ import { Observer, textOf, type UserMessageLike } from './observer.ts'
 import { Distiller, defaultModelCaller } from './distill.ts'
 import { LlmwikiConfig, type LlmwikiConfigValue } from './config.ts'
 import type { AskServiceResolver, AskServiceShape } from './onboard.ts'
+import { isDelegated } from './delegation.ts'
 
 export const name = 'dsh-llmwiki-memory'
 
@@ -157,6 +158,10 @@ export function apply(ctx: Context): void {
     'session/event' as never,
     (function (this: unknown, session: { id: unknown }, event: SessionEvent) {
       const sessionId = String(session.id)
+      // Delegated children are neither injected nor observed: the parent owns
+      // memory duty and narrow task chatter would dilute the pool. The topic
+      // tools stay globally registered, so explicit topic_save still works.
+      if (isDelegated(agents()?.get(session.id))) return
       try {
         const candidate = (this as unknown as Record<string, unknown> | undefined)?.llm as
           | { stream(options: unknown): AsyncIterable<unknown> }

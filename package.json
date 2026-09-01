@@ -38,7 +38,7 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
     "pretest": "tsc -p tsconfig.json",
-    "test": "node --test test/yaml.test.mjs test/okf.test.mjs test/retrieval.test.mjs test/digest.test.mjs test/ilog.test.mjs test/store.test.mjs test/git.test.mjs test/sync.test.mjs test/tools.test.mjs test/commands.test.mjs test/onboard.test.mjs test/observer.test.mjs test/distill.test.mjs test/viz.test.mjs test/corpus.test.mjs"
+    "test": "node --test test/yaml.test.mjs test/okf.test.mjs test/retrieval.test.mjs test/digest.test.mjs test/ilog.test.mjs test/store.test.mjs test/git.test.mjs test/sync.test.mjs test/tools.test.mjs test/commands.test.mjs test/onboard.test.mjs test/delegation.test.mjs test/observer.test.mjs test/distill.test.mjs test/viz.test.mjs test/corpus.test.mjs"
   },
   "dependencies": {},
   "peerDependencies": {

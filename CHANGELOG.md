@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- 子代理隔离：delegation depth > 0 的子代理会话不注入、不被观察、不触发蒸馏——记忆职责归父会话；topic 工具仍在全局层，子代理显式 `topic_save` 不拦（写入走串行队列，与父会话并发安全）。
 - 配置向导：`/wiki onboard` 直接进入 dsh 原生 ask-user 交互——三块面板（存储模式 → 批量问答：仓库/蒸馏模型/注入档位/自动观察 → 确认写入），跳过=保持现状、关面板=零写入、末步确认才批量 mutate settings；默认仓建议名 `dsh-wiki-memory`（`gh api` 自动探测登录名）。依赖只有 `ctx.userQuestions` seam——TUI 面板 / 浏览器会话 / 飞书卡与 dsh-ask-router 多端竞答自动适配；无 provider 的环境退化为逐条输入向导。
 - 默认远端仓库名定为 `dsh-wiki-memory`（ADR 0002/0008 文字同步更正）——原来的 `dsh-llmwiki-memory` 与插件源码仓同名，开同步会撞车。
 - 关系可视化：`/wiki graph` 生成自包含 HTML 关系图（手写力导向 SVG、零外部依赖、离线可用）并自动在浏览器打开——状态配色、度数定节点大小、实线 depends/虚线正文链接、拖拽/缩放/平移、悬停高亮邻居与结论详情、搜索与 tag 过滤。

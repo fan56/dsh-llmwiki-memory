@@ -55,6 +55,7 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 
 ## 已知边界
 
+- **子代理不注入也不观察**：delegation depth > 0 的子代理会话被整体跳过——父会话独占记忆职责，子代理窄任务的过程性对话不进观察池、不触发蒸馏；topic 工具仍在全局层（子代理仍可显式 `topic_save`）。跨进程子代理（claude-code/codex 等 provider）本就不加载本插件。
 - **headless 单发会话里的 session-end 蒸馏**：蒸馏 lane 在 turn/end 触发后异步执行，而 headless 进程答完即退，真实模型调用（秒级）大概率输给进程退出。多轮长会话（tui/web）里每 N 轮的蒸馏不受影响；`meta/distill-state.json` 记录每次 lane 的结局，`/wiki status` 可查。
 - **配置读取时机**：`/wiki set` 与 settings.yaml 修改在下次会话启动后生效最稳。
 
