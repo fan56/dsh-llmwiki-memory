@@ -60,6 +60,34 @@ test('observer: plugin-sourced messages and non-user sources are ignored', async
   }
 })
 
+test('observer: image blocks in user messages are skipped, text alongside still captured', async () => {
+  // dsh 0.1.2-alpha.3: sub-agent follow-up messages may carry image content
+  // blocks; textOf must skip them (no crash, no undefined text) and keep the
+  // text neighbors.
+  const h = make()
+  try {
+    await h.store.ensure()
+    h.observer.onSessionEvent('s1', 'user/message', {
+      source: { kind: 'user' },
+      content: [
+        { type: 'text', text: '看这张架构图' },
+        { type: 'image', mimeType: 'image/png' },
+        { type: 'text', text: '评估迁移风险' },
+      ],
+    })
+    h.observer.onSessionEvent('s1', 'assistant/chunk', { chunk: { type: 'text-delta', text: '迁移风险可控。' } })
+    h.observer.onSessionEvent('s1', 'turn/end', {})
+    await new Promise((r) => setTimeout(r, 30))
+    const obs = await h.store.allObservations()
+    assert.equal(obs.length, 1)
+    assert.match(obs[0].text, /看这张架构图/)
+    assert.match(obs[0].text, /评估迁移风险/)
+    assert.doesNotMatch(obs[0].text, /undefined/)
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('observer: every-N turn trigger fires at the configured cadence', async () => {
   const h = make()
   try {

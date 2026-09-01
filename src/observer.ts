@@ -29,9 +29,12 @@ export interface UserMessageLike {
 }
 
 export function textOf(message: UserMessageLike): string {
+  // Deliberately text-only and explicit: since dsh 0.1.2-alpha.3 sub-agent
+  // follow-up messages may carry image (and other non-text) content blocks —
+  // they are skipped here, never dereferenced for `.text`.
   return message.content
-    .filter((c) => c.type === 'text' && typeof c.text === 'string')
-    .map((c) => c.text as string)
+    .filter((c): c is { type: 'text'; text: string } => c.type === 'text' && typeof c.text === 'string')
+    .map((c) => c.text)
     .join('\n')
 }
 
