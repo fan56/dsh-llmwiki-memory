@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-09-01)
 
 - 蒸馏模型 ask-user 选择流：`/wiki onboard` 的蒸馏一步拆成两问——先问 provider（选项来自 `llm.listProviders()` 的活路由 + 「暂不启用蒸馏（跳过）」，每题 ≤10 个 option），答完再问该 provider 的 model（`llm.listModels()` 目录取前 8，detail 注明共 N 个、Other 手输兜底；provider→model 有依赖，两次独立 ask）。答案写入 pending 批量，经 `resolveModelInfo` 预校验：NO_ADAPTER 阻断并在面板上提示重选（有界重试），非 NO_ADAPTER 失败（模型目录外，可能仍可用）则警告放行（确认面板 detail 标注 ⚠️）。ask 面板或可用模型路由缺失的环境整体退回原文本向导（零新路径）。
 - `/wiki set` 交互式设置蒸馏路由：`/wiki set distill-provider` / `distill-model` 不带值且有 ask UI + 可用 llm 目录时弹对应单题面板（distill-model 先读当前 distill-provider 作为目录来源，未配 provider 提示先配）；带值仍走文本路径；取消/空答案零写入。面板选项与 onboard 主流程同级预校验（provider 须在活路由表中，model 经 `resolveModelInfo`——NO_ADAPTER 阻断重选，目录外警告放行）；面板不可用时返回错误提示、不再静默清空键值。
