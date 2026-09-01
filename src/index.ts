@@ -16,7 +16,12 @@
  *  - sync (ADR 0003): pull on session start, debounced write-through push
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { createRequire } from 'node:module'
+// Type-only side-effect import: loads dsh-settings' `declare module
+// '@deepseek-ai/cordis'` augmentation, which is what puts `ctx.settings` on
+// the Context type. There is no runtime import — the host provides the
+// settings service; dsh-settings 0.1.2-alpha.3 removed the
+// settingsNamespace() helper this file used to import at runtime.
+import type {} from '@deepseek-ai/dsh-settings'
 import * as paths from './paths.ts'
 import { BundleStore } from './store.ts'
 import { WikiService } from './service.ts'
@@ -31,6 +36,13 @@ export const name = 'dsh-llmwiki-memory'
 
 /** Services consumed at apply time; llm joins via guarded ctx.inject. */
 export const inject = ['systemPrompt', 'tools', 'settings', 'agents', 'llm']
+
+// dsh-settings 0.1.2-alpha.3 removed the runtime settingsNamespace() helper:
+// register() now brand-checks the namespace at the type level
+// (SettingsNamespaceInput) and validates the same lowercase-hyphenated
+// pattern at runtime via parseSettingsNamespace. A plain literal is the
+// supported spelling (same adaptation as dsh-cron / dsh-model-sync).
+const OWN_NS = 'llmwiki'
 
 interface AgentMapLike {
   get(id: unknown): { inbox: { nextTurn: readonly unknown[]; nextStep: readonly unknown[] } } | undefined
@@ -49,17 +61,9 @@ interface UserMessageData {
 export function apply(ctx: Context): void {
   // dsh-settings is part of every real host closure but is a runtime-optional
   // peer so bare test harnesses can still load this module.
-  const req = createRequire(import.meta.url)
-  const ns: unknown = (() => {
-    try {
-      return (req('@deepseek-ai/dsh-settings') as { settingsNamespace(n: string): unknown }).settingsNamespace('llmwiki')
-    } catch {
-      return 'llmwiki'
-    }
-  })()
   const settingsNs = (ctx as unknown as { settings?: { register(n: unknown, s: unknown): { get(): unknown } } }).settings
   if (settingsNs === undefined) return
-  const scope = settingsNs.register(ns, LlmwikiConfig)
+  const scope = settingsNs.register(OWN_NS, LlmwikiConfig)
   const cfgNow = (): LlmwikiConfigValue => {
     const v = scope.get() as Partial<LlmwikiConfigValue> | undefined
     // Schema defaults may not be applied by bare test harnesses; fill them in.
@@ -243,7 +247,7 @@ export function apply(ctx: Context): void {
     }).settings
     const mutate = async (ops: readonly { op: 'set'; path: string[]; value?: unknown }[]): Promise<void> => {
       if (settingsMutator?.mutate === undefined) throw new Error('settings 服务不可用，无法写入配置')
-      await settingsMutator.mutate(ns, ops)
+      await settingsMutator.mutate(OWN_NS, ops)
     }
     cmdCtx.effect(() => commands.register(buildWikiCommand(service, mutate as never)), 'llmwiki: /wiki')
   })
