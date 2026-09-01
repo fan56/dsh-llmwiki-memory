@@ -324,11 +324,12 @@ export async function runInteractiveOnboard(
   ask: AskServiceShape,
   detectLogin: GithubLoginDetector,
   agent: InvocationAgentShape | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<CommandResult> {
   const ok = (text: string): CommandResult => ({ kind: 'success', text })
   const fail = (text: string): CommandResult => ({ kind: 'error', text })
   const panel = async (questions: AskItemShape[]): Promise<AskAnswerItemShape[]> => {
-    const r = await ask.ask({ questions, ...(agent === undefined ? {} : { agent }) })
+    const r = await ask.ask({ questions, ...(agent === undefined ? {} : { agent }), ...(signal === undefined ? {} : { signal }) })
     // Normalize: tolerate providers that omit `selected` on pure-custom answers.
     return (r.answers ?? []).map((a) => ({ ...a, selected: a.selected ?? [] }))
   }
@@ -503,8 +504,8 @@ export function createOnboardHandler(
       // panel flow; explicit args always mean typed-wizard answers.
       const askService = resolveAsk()
       if (askService !== undefined && typeof askService.ask === 'function') {
-        const agent = (invocation as { agent?: InvocationAgentShape }).agent
-        return runInteractiveOnboard(service, mutate, askService, detectLogin, agent)
+        const invocationLike = invocation as { agent?: InvocationAgentShape; signal?: AbortSignal }
+        return runInteractiveOnboard(service, mutate, askService, detectLogin, invocationLike.agent, invocationLike.signal)
       }
       if (state.step === 'done') state = freshState()
       return ok(renderStep(state, service.cfg))
