@@ -1,6 +1,6 @@
 # 子代理会话不注入、不观察
 
-Status: accepted
+Status: accepted（「不做配置开关」条款已被 ADR 0011 取代：现为 `include-subagents` 开关，默认开 = 参与子代理会话；off 恢复本文的跳过语义）
 
 ## Context
 

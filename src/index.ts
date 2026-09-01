@@ -158,10 +158,11 @@ export function apply(ctx: Context): void {
     'session/event' as never,
     (function (this: unknown, session: { id: unknown }, event: SessionEvent) {
       const sessionId = String(session.id)
-      // Delegated children are neither injected nor observed: the parent owns
-      // memory duty and narrow task chatter would dilute the pool. The topic
-      // tools stay globally registered, so explicit topic_save still works.
-      if (isDelegated(agents()?.get(session.id))) return
+      // Opt-out isolation (include-subagents off): delegated children get no
+      // injection and no observation — the parent owns memory duty and narrow
+      // task chatter would dilute the pool. The topic tools stay globally
+      // registered either way, so explicit topic_save still works.
+      if (!cfgNow().includeSubagents && isDelegated(agents()?.get(session.id))) return
       try {
         const candidate = (this as unknown as Record<string, unknown> | undefined)?.llm as
           | { stream(options: unknown): AsyncIterable<unknown> }
@@ -280,6 +281,7 @@ const DEFAULTS: LlmwikiConfigValue = {
   graphDepth: 2,
   recencyWindowDays: 7,
   autoObserve: true,
+  includeSubagents: true,
   observationMaxChars: 2000,
   distillEveryTurns: 20,
   distillOnSessionEnd: true,

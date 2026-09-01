@@ -28,6 +28,8 @@ export const LlmwikiConfig = z.object({
   recencyWindowDays: z.number().default(7),
   /** Capture each turn's user/assistant text as raw observations (M2). */
   autoObserve: z.boolean().default(true),
+  /** Whether injection and observation also engage delegated subagent sessions (ADR 0011). */
+  includeSubagents: z.boolean().default(true),
   /** Max auto-captured chars per side (user/assistant) per turn. */
   observationMaxChars: z.number().default(2000),
   /** Background distill cadence: every N turns of a long session. */
@@ -52,6 +54,7 @@ export type LlmwikiConfigValue = {
   graphDepth: number
   recencyWindowDays: number
   autoObserve: boolean
+  includeSubagents: boolean
   observationMaxChars: number
   distillEveryTurns: number
   distillOnSessionEnd: boolean
@@ -71,6 +74,7 @@ export const CONFIG_KEYS = [
   'graphDepth',
   'recencyWindowDays',
   'autoObserve',
+  'includeSubagents',
   'observationMaxChars',
   'distillEveryTurns',
   'distillOnSessionEnd',
@@ -97,7 +101,8 @@ export function parseConfigValue(key: ConfigKey, raw: string): boolean | number 
     }
     case 'autoInject':
     case 'autoObserve':
-    case 'distillOnSessionEnd': {
+    case 'distillOnSessionEnd':
+    case 'includeSubagents': {
       if (raw === 'on' || raw === 'true') return true
       if (raw === 'off' || raw === 'false') return false
       return { error: `${key} 取值 on|off` }

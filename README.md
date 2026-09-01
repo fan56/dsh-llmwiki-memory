@@ -65,6 +65,7 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 | `graphDepth` | `2` | `depends` 图双向游走深度（0 关闭） |
 | `recencyWindowDays` | `7` | 近因加分窗口（+0.2） |
 | `autoObserve` | `true` | 每轮自动抓原子观察 |
+| `includeSubagents` | `true` | 注入与观察是否作用于子代理会话（ADR 0011）；`off` = 子代理整体跳过 |
 | `observationMaxChars` | `2000` | 每侧每轮观察截断长度 |
 | `distillProvider` / `distillModel` | 空（蒸馏关闭） | 蒸馏 lane 模型路由，两者都设置才启用 |
 | `distillEveryTurns` | `20` | 长 session 每 N 轮触发一次蒸馏 |
@@ -83,7 +84,7 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 
 ## 已知边界
 
-- **子代理不注入也不观察**：delegation depth > 0 的子代理会话被整体跳过——父会话独占记忆职责，子代理窄任务的过程性对话不进观察池、不触发蒸馏；topic 工具仍在全局层（子代理仍可显式 `topic_save`）。跨进程子代理（claude-code/codex 等 provider）本就不加载本插件。
+- **子代理默认参与记忆，可整体关掉**：默认（`include-subagents` 开）注入与观察同样作用于子代理会话。`/wiki set include-subagents off` 后，delegation depth > 0 的子代理会话被整体跳过——不注入、不观察、不触发蒸馏；topic 工具始终在全局层（子代理显式 `topic_save` 不受开关影响）。跨进程子代理（claude-code/codex 等 provider）本就不加载本插件。
 - **headless 单发会话里的 session-end 蒸馏**：蒸馏 lane 在 turn/end 触发后异步执行，而 headless 进程答完即退，真实模型调用（秒级）大概率输给进程退出。多轮长会话（tui/web）里每 N 轮的蒸馏不受影响；`meta/distill-state.json` 记录每次 lane 的结局，`/wiki status` 可查。
 - **配置读取时机**：`/wiki set` 与 settings.yaml 修改在下次会话启动后生效最稳。
 
