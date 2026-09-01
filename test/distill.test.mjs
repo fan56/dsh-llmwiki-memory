@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BundleStore } from '../lib/store.js'
 import { WikiService } from '../lib/service.js'
-import { Distiller, parseOps } from '../lib/distill.js'
+import { Distiller, defaultModelCaller, parseOps, pickLiveLlm } from '../lib/distill.js'
 
 function make() {
   const root = mkdtempSync(join(tmpdir(), 'llmwiki-distill-'))
@@ -214,4 +214,103 @@ test('distiller: skipped observations stay pending', async () => {
   } finally {
     h.cleanup()
   }
+})
+
+// ---- Distill lane instance probing (D) ----
+
+test('pickLiveLlm: scoped wins, route-less and disposed candidates are skipped', () => {
+  const scopedStale = { stream() {}, listProviders: () => [{ id: 'other' }] }
+  const root = { stream() {}, listProviders: () => [{ id: 'zai-coding-cn' }] }
+  assert.equal(pickLiveLlm([scopedStale, root], 'zai-coding-cn'), root, 'candidate without the route is skipped')
+  const scopedLive = { stream() {}, listProviders: () => [{ id: 'p' }] }
+  assert.equal(pickLiveLlm([scopedLive, root], 'p'), scopedLive, 'first candidate carrying the route wins')
+  const dead = { stream() {}, get listProviders() { throw new Error('disposed scope') } }
+  assert.equal(pickLiveLlm([dead, root], 'zai-coding-cn'), root, 'disposed scope (throws on access) is skipped')
+  const legacy = { stream() {} } // no listProviders → cannot probe, still usable
+  assert.equal(pickLiveLlm([legacy], 'p'), legacy)
+  // ① no reachable instance at all (missing / disposed on access).
+  assert.throws(() => pickLiveLlm([undefined, undefined], 'p'), /没有可用的模型服务实例/)
+  assert.throws(() => pickLiveLlm([dead], 'p'), /没有可用的模型服务实例/)
+  // ② reachable instances, none carrying the route — say which provider failed.
+  assert.throws(
+    () => pickLiveLlm([scopedStale], 'zai-coding-cn'),
+    /distill-provider «zai-coding-cn» 没有匹配的模型路由（检查拼写或本机 provider 配置），等待下次会话启动重试/,
+  )
+})
+
+test('defaultModelCaller: probes candidates before streaming; all-dead throws readable Chinese', async () => {
+  const streamed = []
+  const live = {
+    listProviders: () => [{ id: 'p' }],
+    stream: async function* (options) {
+      streamed.push(options.provider)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'hello' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'hello' } }
+      yield { type: 'finish', reason: 'stop' }
+    },
+  }
+  const dead = { stream() {}, get listProviders() { throw new Error('disposed') } }
+  const caller = defaultModelCaller(() => [dead, live], () => ({ provider: 'p', model: 'm' }))
+  const text = await caller({ system: 's', user: 'u', purpose: 't', maxTokens: 10 })
+  assert.equal(text, 'hello')
+  assert.deepEqual(streamed, ['p'], 'stream went to the live instance, never the dead one')
+  const deadCaller = defaultModelCaller(() => [undefined, undefined], () => ({ provider: 'p', model: 'm' }))
+  await assert.rejects(() => deadCaller({ system: 's', user: 'u', purpose: 't', maxTokens: 10 }), /没有可用的模型服务实例/)
+})
+
+test('distiller: dead llm scope records a readable failure instead of a raw NO_ADAPTER', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await h.store.appendObservation({ kind: 'turn', source: 'auto', text: 'x' })
+    const caller = defaultModelCaller(() => [undefined], () => ({ provider: 'zai-coding-cn', model: 'glm-x' }))
+    const d = new Distiller(h.service, caller)
+    const r = await d.run('s1')
+    assert.equal(r.ok, false)
+    assert.equal(r.reason, 'model-error')
+    assert.match(r.detail, /没有可用的模型服务实例/)
+    assert.doesNotMatch(r.detail ?? '', /^Error: NO_ADAPTER/)
+    // Observations stay pending for the next session's retry.
+    assert.equal((await h.store.undistilledObservations()).length, 1)
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ---- BlockAssembler.finish shapes (defensive dual-shape compat) ----
+
+/** Llm instance whose stream ends with the given finish reason (or none). */
+function finishLlm(reason) {
+  return {
+    listProviders: () => [{ id: 'p' }],
+    stream: async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'hi' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'hi' } }
+      if (reason !== undefined) yield { type: 'finish', reason }
+    },
+  }
+}
+
+test('defaultModelCaller: finish object shapes — {kind:"stop"} resolves, max-tokens/error reject', async () => {
+  const req = { system: 's', user: 'u', purpose: 't', maxTokens: 10 }
+  const make = (reason) => defaultModelCaller(() => [finishLlm(reason)], () => ({ provider: 'p', model: 'm' }))
+  // Object shapes — the ONLY shape observed in any known dsh-llm build
+  // (harness assembler.ts: `get finish() { return this._finish ?? { kind: 'stop' } }`).
+  assert.equal(await make({ kind: 'stop' })(req), 'hi', '{kind:"stop"} chunk resolves')
+  assert.equal(await make(undefined)(req), 'hi', 'no finish chunk → assembler default {kind:"stop"} resolves')
+  await assert.rejects(() => make({ kind: 'max-tokens' })(req), /model finish: max-tokens/)
+  await assert.rejects(
+    () => make({ kind: 'error', failure: { message: 'boom', code: 'PROVIDER' } })(req),
+    /boom/,
+    'failure.message wins over the generic finish text',
+  )
+})
+
+test('defaultModelCaller: finish bare-string shapes stay tolerated (defensive, never observed)', async () => {
+  const req = { system: 's', user: 'u', purpose: 't', maxTokens: 10 }
+  const make = (reason) => defaultModelCaller(() => [finishLlm(reason)], () => ({ provider: 'p', model: 'm' }))
+  assert.equal(await make('stop')(req), 'hi', 'bare "stop" resolves')
+  await assert.rejects(() => make('rate-limited')(req), /model finish: rate-limited/)
 })

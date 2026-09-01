@@ -18,6 +18,8 @@ export interface InjectionRecord {
   injected: boolean
   why?: string
   dropped?: { slug: string; reason: string }[]
+  /** Slugs blocked this round by session-level injection dedup (never assembled). */
+  deduped?: string[]
   usedTokens?: number
 }
 
@@ -49,7 +51,14 @@ export function aggregateStats(records: readonly InjectionRecord[]): AggregateSt
       budgetSamples += 1
       budgetSum += r.usedTokens
     }
-    for (const h of r.hits) topicCounts.set(h.slug, (topicCounts.get(h.slug) ?? 0) + 1)
+    // topTopics feeds 「Top-N 被注入 Topic」— deduped hits were NOT injected,
+    // so they must not inflate the per-slug injection counts. Retrieval-shape
+    // metrics above (hits/rounds, zero-hit rounds) keep counting raw hits.
+    const deduped = r.deduped === undefined ? undefined : new Set(r.deduped)
+    for (const h of r.hits) {
+      if (deduped?.has(h.slug)) continue
+      topicCounts.set(h.slug, (topicCounts.get(h.slug) ?? 0) + 1)
+    }
     for (const nm of r.nearMisses) {
       const bucket = nmBucket(nm.score)
       buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1)

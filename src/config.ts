@@ -12,6 +12,8 @@ export const LlmwikiConfig = z.object({
   repo: z.string().default(''),
   /** Master switch for per-turn injection. */
   autoInject: z.boolean().default(true),
+  /** Skip re-injecting topics already injected earlier in the same session. */
+  injectDedup: z.boolean().default(true),
   /** Max topics injected per round (ADR 0006: ≤4). */
   topK: z.number().default(4),
   /** Per-topic digest budget in tokens. */
@@ -46,6 +48,7 @@ export const LlmwikiConfig = z.object({
 export type LlmwikiConfigValue = {
   repo: string
   autoInject: boolean
+  injectDedup: boolean
   topK: number
   perTopicBudget: number
   totalBudget: number
@@ -66,6 +69,7 @@ export type LlmwikiConfigValue = {
 export const CONFIG_KEYS = [
   'repo',
   'autoInject',
+  'injectDedup',
   'topK',
   'perTopicBudget',
   'totalBudget',
@@ -100,6 +104,7 @@ export function parseConfigValue(key: ConfigKey, raw: string): boolean | number 
       return raw
     }
     case 'autoInject':
+    case 'injectDedup':
     case 'autoObserve':
     case 'distillOnSessionEnd':
     case 'includeSubagents': {

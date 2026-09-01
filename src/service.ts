@@ -162,13 +162,19 @@ export class WikiService {
    * provider reads the assembled text synchronously — an async retrieval
    * would always lose the race and inject nothing. Reads files with sync fs
    * behind the mtime cache; the log record is written fire-and-forget.
+   *
+   * `dedup.exclude` (session-level injection dedup) filters hits AFTER
+   * retrieval and BEFORE assembly: excluded slugs are reported back as
+   * `deduped` (and logged as `record.deduped`), never packed. `included`
+   * mirrors what actually entered the context — only these may be marked
+   * as injected by the caller; budget-dropped slugs stay injectable later.
    */
-  retrieveSync(query: string, sessionId?: string): { text: string; outcome: SearchOutcome } {
+  retrieveSync(query: string, sessionId?: string, dedup?: { exclude?: ReadonlySet<string> }): { text: string; outcome: SearchOutcome; deduped: string[]; included: string[] } {
     const cfg = this.cfg
     const roster = this.rosterSync()
     const empty: SearchOutcome = { hits: [], nearMisses: [], rosterSize: roster.length }
     if (!cfg.autoInject || query.trim() === '' || roster.length === 0) {
-      return { text: '', outcome: empty }
+      return { text: '', outcome: empty, deduped: [], included: [] }
     }
     const conflicts = this.store.getConflictsSync()
     const outcome = searchTopics(query, roster, {
@@ -179,8 +185,11 @@ export class WikiService {
       recencyWindowDays: cfg.recencyWindowDays,
       conflicts,
     })
+    const exclude = dedup?.exclude
+    const deduped = exclude === undefined ? [] : outcome.hits.filter((h) => exclude.has(h.slug)).map((h) => h.slug)
     const entries: DigestInput[] = []
     for (const hit of outcome.hits) {
+      if (exclude?.has(hit.slug)) continue
       const doc = this.readDocSync(hit.slug)
       if (doc !== undefined) entries.push({ slug: hit.slug, doc, hit })
     }
@@ -199,10 +208,14 @@ export class WikiService {
       usedTokens: injection.usedTokens,
     }
     if (sessionId !== undefined) record.sessionId = sessionId
-    if (injection.text === '' && outcome.hits.length > 0) record.why = 'below-budget-or-dropped'
+    if (deduped.length > 0) record.deduped = deduped
+    if (injection.text === '' && outcome.hits.length > 0) {
+      // All hits deduped is a different story than a budget squeeze — say so.
+      record.why = deduped.length === outcome.hits.length ? 'dedup' : 'below-budget-or-dropped'
+    }
     if (injection.dropped.length > 0) record.dropped = injection.dropped
     void this.store.appendInjectionRecord(record).catch(() => undefined)
-    return { text: injection.text, outcome }
+    return { text: injection.text, outcome, deduped, included: injection.included }
   }
 
   /** Sync roster read (same mtime cache as roster()). */

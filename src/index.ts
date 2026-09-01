@@ -24,9 +24,9 @@ import { Sync } from './sync.ts'
 import { buildTopicTools } from './tools.ts'
 import { buildWikiCommand } from './commands.ts'
 import { Observer, textOf, type UserMessageLike } from './observer.ts'
-import { Distiller, defaultModelCaller } from './distill.ts'
+import { Distiller, defaultModelCaller, type LlmCandidateShape } from './distill.ts'
 import { LlmwikiConfig, type LlmwikiConfigValue } from './config.ts'
-import type { AskServiceResolver, AskServiceShape } from './onboard.ts'
+import type { AskServiceResolver, AskServiceShape, LlmDirectoryResolver, LlmDirectoryShape } from './onboard.ts'
 import { isDelegated } from './delegation.ts'
 
 export const name = 'dsh-llmwiki-memory'
@@ -97,6 +97,12 @@ export function apply(ctx: Context): void {
     injectionText: string
   }
   const turns = new Map<string, TurnState>()
+  // Session-level injection dedup: slugs ACTUALLY injected per session.
+  // Outlives turns (turn/start must not clear it — the runtime-context
+  // snapshot stays in the model history, so a re-inject is pure redundancy)
+  // and is cleared only when the session ends. Budget-dropped slugs never
+  // enter the registry: they never reached the context and may inject later.
+  const injectedBySession = new Map<string, Set<string>>()
 
   ;(ctx as unknown as { systemPrompt: { context(input: { name: string; order: number; text: (asm: unknown) => string }): void } }).systemPrompt.context({
     name: 'llmwiki:topic-memory',
@@ -117,7 +123,20 @@ export function apply(ctx: Context): void {
     try {
       const state = turns.get(sessionId)
       if (state === undefined) return
-      state.injectionText = service.retrieveSync(query, sessionId).text
+      const dedup = cfgNow().injectDedup
+      const seen = dedup ? injectedBySession.get(sessionId) : undefined
+      const r = service.retrieveSync(query, sessionId, seen === undefined ? undefined : { exclude: seen })
+      // Mark only what entered the context this round (hits → dedup filter →
+      // assemble → registry mark; budget-dropped slugs stay injectable).
+      if (dedup && r.included.length > 0) {
+        let marked = injectedBySession.get(sessionId)
+        if (marked === undefined) {
+          marked = new Set<string>()
+          injectedBySession.set(sessionId, marked)
+        }
+        for (const slug of r.included) marked.add(slug)
+      }
+      state.injectionText = r.text
     } catch {
       // Contained: a retrieval failure must never break the turn.
     }
@@ -131,15 +150,15 @@ export function apply(ctx: Context): void {
   // The llm service is SCOPED per agent: adapters (real or replay) register
   // on the session-scoped instance, not the root one captured at apply time.
   // During event dispatch the handler's `this` is the active scoped context —
-  // grab its llm there (while active; after teardown access throws). Fallback
-  // chain: session-scoped capture → apply-time root instance.
-  const llmRef: { scoped?: { stream(options: unknown): AsyncIterable<unknown> }; root?: { stream(options: unknown): AsyncIterable<unknown> } } = {}
-  llmRef.root = (ctx as unknown as Record<string, unknown>).llm as
-    | { stream(options: unknown): AsyncIterable<unknown> }
-    | undefined
+  // grab its llm there (while active; after teardown access throws). Candidate
+  // chain: session-scoped capture → apply-time root instance; the distill
+  // caller probes each cheaply (listProviders must contain the route) so a
+  // stale capture whose scope was torn down can't kill the run.
+  const llmRef: { scoped?: LlmCandidateShape; root?: LlmCandidateShape } = {}
+  llmRef.root = (ctx as unknown as Record<string, unknown>).llm as LlmCandidateShape | undefined
   void import('@deepseek-ai/dsh-llm').catch(() => undefined)
   const caller = defaultModelCaller(
-    () => llmRef.scoped ?? llmRef.root,
+    () => [llmRef.scoped, llmRef.root],
     () => {
       const c = cfgNow()
       return c.distillProvider !== '' && c.distillModel !== '' ? { provider: c.distillProvider, model: c.distillModel } : undefined
@@ -215,6 +234,9 @@ export function apply(ctx: Context): void {
           state.injectionText = ''
         }
       }
+      if (event.type === 'session/end-seed' || event.type === 'agent/disposed') {
+        injectedBySession.delete(sessionId)
+      }
       observer.onSessionEvent(sessionId, event.type, event.data)
     }) as never,
   )
@@ -265,7 +287,29 @@ export function apply(ctx: Context): void {
         return undefined
       }
     }
-    cmdCtx.effect(() => commands.register(buildWikiCommand(service, mutate as never, resolveAsk)), 'llmwiki: /wiki')
+    // The llm directory (listProviders/listModels/resolveModelInfo) feeds the
+    // distill provider/model pickers. The sources are offered as ORDERED
+    // CANDIDATES — the consumer (pickLlmDirectory) takes the first whose
+    // listProviders() is non-empty — so a root instance without adapters no
+    // longer shadows the session-scoped one, and vice versa. llmRef.root
+    // (captured by property access) keeps a root instance reachable even on
+    // hosts whose ctx exposes no .get().
+    const resolveLlm: LlmDirectoryResolver = () => {
+      let root: LlmDirectoryShape | undefined
+      try {
+        root = typeof (ctx as { get?: (k: string) => unknown }).get === 'function'
+          ? (ctx as { get: (k: string) => unknown }).get('llm') as LlmDirectoryShape | undefined
+          : undefined
+      } catch {
+        root = undefined
+      }
+      return [
+        llmRef.scoped as unknown as LlmDirectoryShape | undefined,
+        llmRef.root as unknown as LlmDirectoryShape | undefined,
+        root,
+      ]
+    }
+    cmdCtx.effect(() => commands.register(buildWikiCommand(service, mutate as never, resolveAsk, resolveLlm)), 'llmwiki: /wiki')
   })
 }
 
@@ -273,6 +317,7 @@ export function apply(ctx: Context): void {
 const DEFAULTS: LlmwikiConfigValue = {
   repo: '',
   autoInject: true,
+  injectDedup: true,
   topK: 4,
   perTopicBudget: 300,
   totalBudget: 1500,

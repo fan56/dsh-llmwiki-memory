@@ -59,6 +59,7 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 |---|---|---|
 | `repo` | 空（local-only） | GitHub 同步仓 `owner/name`；建议 `dsh-wiki-memory`；置空回 local-only |
 | `autoInject` | `true` | 每轮注入总开关 |
+| `injectDedup` | `true` | 会话级注入去重：本会话已实际注入过的 Topic 不重注（会话结束清空注册表；被预算丢弃的仍可注入；被去重占用的 topK 名额不回填）——见 ADR 0012 |
 | `topK` | `4` | 每轮最多注入的 Topic 数 |
 | `perTopicBudget` | `300` | 单 Topic 摘要 token 预算 |
 | `totalBudget` | `1500` | 每轮注入总预算 |
@@ -69,7 +70,7 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 | `autoObserve` | `true` | 每轮自动抓原子观察 |
 | `includeSubagents` | `true` | 注入与观察是否作用于子代理会话（ADR 0011）；`off` = 子代理整体跳过 |
 | `observationMaxChars` | `2000` | 每侧每轮观察截断长度 |
-| `distillProvider` / `distillModel` | 空（蒸馏关闭） | 蒸馏 lane 模型路由，两者都设置才启用 |
+| `distillProvider` / `distillModel` | 空（蒸馏关闭） | 蒸馏 lane 模型路由，两者都设置才启用。有 UI 时 `/wiki set distill-provider` / `distill-model` 不带值会弹选择面板（provider 列表 → 该 provider 的模型目录）；带值时 `distill-model` 支持 `provider model` 或 `provider/model` 混写自动拆成两个键 |
 | `distillEveryTurns` | `20` | 长 session 每 N 轮触发一次蒸馏 |
 | `distillOnSessionEnd` | `true` | session 结束时蒸馏一次 |
 | `pushDebounceSeconds` | `45` | GitHub 模式去抖推送间隔 |
@@ -89,11 +90,12 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 - **子代理默认参与记忆，可整体关掉**：默认（`include-subagents` 开）注入与观察同样作用于子代理会话。`/wiki set include-subagents off` 后，delegation depth > 0 的子代理会话被整体跳过——不注入、不观察、不触发蒸馏；topic 工具始终在全局层（子代理显式 `topic_save` 不受开关影响）。跨进程子代理（claude-code/codex 等 provider）本就不加载本插件。
 - **headless 单发会话里的 session-end 蒸馏**：蒸馏 lane 在 turn/end 触发后异步执行，而 headless 进程答完即退，真实模型调用（秒级）大概率输给进程退出。多轮长会话（tui/web）里每 N 轮的蒸馏不受影响；`meta/distill-state.json` 记录每次 lane 的结局，`/wiki status` 可查。
 - **配置读取时机**：`/wiki set` 与 settings.yaml 修改在下次会话启动后生效最稳。
+- **蒸馏选模型**：`/wiki onboard` 的蒸馏一步拆成两问（先 provider 后 model，模型列表取自该 provider 的目录），选完经 `resolveModelInfo` 预校验——provider 无活路由会阻断重选，模型目录校验非 NO_ADAPTER 失败（目录外，可能仍可用）则警告但放行；无 ask UI 或无可用模型路由的环境自动退回文本输入。`/wiki set` 的选择面板走同一套校验。
 
 ## 设计文档
 
 - [CONTEXT.md](CONTEXT.md) — 领域术语表
-- [docs/adr/](docs/adr/) — 0001–0011：OKF 合规、Remote 形态、同步策略、两段式 Observer、Bundle 布局、注入默认值、可观测与调参、双模式持久化
+- [docs/adr/](docs/adr/) — 0001–0012：OKF 合规、Remote 形态、同步策略、两段式 Observer、Bundle 布局、注入默认值、可观测与调参、双模式持久化、配置向导、子代理隔离、include-subagents 开关、注入去重默认开
 
 ## License
 

@@ -276,28 +276,193 @@ test('onboard: pure core — applyAnswer/confirmOps/renderStep agree', () => {
 
 // ---- Interactive path (native ask-user panels) ----
 
-test('onboard interactive: local-only happy path asks 3 panels and writes the batch', async () => {
+/** Mock llm directory for the distill provider/model pickers. */
+function fakeLlm() {
+  const many = Array.from({ length: 10 }, (_, i) => ({ provider: 'zai-coding-cn', id: `glm-${i + 1}`, name: `GLM ${i + 1}` }))
+  const llm = {
+    providers: [{ id: 'prov', name: 'Prov One' }, { id: 'zai-coding-cn', name: 'Zai Coding' }],
+    modelsByProvider: { prov: [{ provider: 'prov', id: 'm1', name: 'M1' }, { provider: 'prov', id: 'm2', name: 'M2' }], 'zai-coding-cn': many },
+    validated: [],
+    validateError: undefined, // optional fn(provider, model) → thrown error
+    listProviders() { return llm.providers },
+    listModels: async (p) => llm.modelsByProvider[p] ?? [],
+    resolveModelInfo: async (p, m) => {
+      llm.validated.push(`${p}/${m}`)
+      if (llm.validateError !== undefined) throw llm.validateError(p, m)
+      return { provider: p, id: m, name: m }
+    },
+  }
+  return llm
+}
+
+const SKIP = '暂不启用蒸馏（跳过）'
+
+test('onboard interactive: local-only happy path asks mode → distill two-step → batch → confirm', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
+    const llm = fakeLlm()
     const ask = fakeAsk([
       [{ id: 'mode', selected: ['local-only'] }],
-      [{ id: 'distill', selected: [] }, { id: 'inject', selected: ['标准（topK 4 · 1.5k tok）'] }, { id: 'observe', selected: [] }],
+      [{ id: 'distill-provider', selected: ['prov'] }],
+      [{ id: 'distill-model', selected: ['m1'] }],
+      [{ id: 'inject', selected: ['标准（topK 4 · 1.5k tok）'] }, { id: 'observe', selected: [] }],
       [{ id: 'confirm', selected: ['写入'] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'success')
-    assert.match(r.text, /已写入 llmwiki 配置（2 项）/)
-    assert.equal(ask.calls.length, 3)
-    assert.equal(ask.calls[0].questions.length, 1)
-    assert.equal(ask.calls[0].questions[0].id, 'mode')
-    assert.equal(ask.calls[0].questions[0].options.length, 2)
-    // Local-only path: no repo question in the batch.
-    assert.deepEqual(ask.calls[1].questions.map((q) => q.id), ['distill', 'inject', 'observe'])
-    assert.equal(ask.calls[2].questions[0].id, 'confirm')
-    assert.match(ask.calls[2].questions[0].detail, /top-k = 4/)
+    assert.match(r.text, /已写入 llmwiki 配置（4 项）/)
+    assert.equal(ask.calls.length, 5)
+    // Provider panel: live ids + skip, one question per ask (provider → model dependency).
+    assert.equal(ask.calls[1].questions.length, 1)
+    assert.equal(ask.calls[1].questions[0].id, 'distill-provider')
+    assert.deepEqual(ask.calls[1].questions[0].options.map((o) => o.label), ['prov', 'zai-coding-cn', SKIP])
+    // Model panel: list comes from the chosen provider's catalog, ≤8 options.
+    assert.equal(ask.calls[2].questions[0].id, 'distill-model')
+    assert.match(ask.calls[2].questions[0].question, /prov/)
+    assert.deepEqual(ask.calls[2].questions[0].options.map((o) => o.label), ['m1', 'm2'])
+    // Batch no longer carries a free-text distill question.
+    assert.deepEqual(ask.calls[3].questions.map((q) => q.id), ['inject', 'observe'])
+    assert.equal(ask.calls[4].questions[0].id, 'confirm')
+    // Pre-validation ran before anything was queued.
+    assert.deepEqual(llm.validated, ['prov/m1'])
+    assert.deepEqual(ask.calls[4].questions[0].detail, expectDistillConfirmDetail())
     assert.equal(mutations.length, 1)
-    assert.deepEqual(mutations[0], ['topK=4', 'totalBudget=1500'])
+    assert.deepEqual(mutations[0], ['topK=4', 'totalBudget=1500', 'distillProvider=prov', 'distillModel=m1'])
+  } finally {
+    cleanup()
+  }
+})
+
+function expectDistillConfirmDetail() {
+  return [
+    '- top-k = 4',
+    '- total-budget = 1500',
+    '- distill-provider = prov',
+    '- distill-model = m1',
+  ].join('\n')
+}
+
+test('onboard interactive: model catalog truncates to 8 with 共 N hint; custom input wins', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const llm = fakeLlm()
+    const ask = fakeAsk([
+      [{ id: 'mode', selected: ['local-only'] }],
+      [{ id: 'distill-provider', selected: ['zai-coding-cn'] }],
+      [{ id: 'distill-model', custom: 'glm-custom-x' }],
+      [{ id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
+      [{ id: 'confirm', selected: ['写入'] }],
+    ])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const r = await cmd.handler(inv('onboard'))
+    assert.equal(r.kind, 'success')
+    const modelQ = ask.calls[2].questions[0]
+    assert.equal(modelQ.options.length, 8)
+    assert.match(modelQ.detail, /共 10 个模型（列出前 8）/)
+    assert.match(modelQ.detail, /Other 手输/)
+    assert.deepEqual(mutations[0], ['distillProvider=zai-coding-cn', 'distillModel=glm-custom-x'])
+    assert.deepEqual(llm.validated, ['zai-coding-cn/glm-custom-x'])
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: off-catalog model (non-NO_ADAPTER failure) warns in confirm detail but allows the write', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const llm = fakeLlm()
+    llm.validateError = () => {
+      const e = new Error('model not in catalog')
+      e.code = 'MODEL_NOT_FOUND'
+      return e
+    }
+    const ask = fakeAsk([
+      [{ id: 'mode', selected: ['local-only'] }],
+      [{ id: 'distill-provider', selected: ['prov'] }],
+      [{ id: 'distill-model', selected: ['m1'] }],
+      [{ id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
+      [{ id: 'confirm', selected: ['写入'] }],
+    ])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const r = await cmd.handler(inv('onboard'))
+    assert.equal(r.kind, 'success')
+    assert.match(ask.calls[4].questions[0].detail, /⚠️ m1 未通过 prov 的模型目录校验（模型目录外，可能仍可用）/)
+    assert.deepEqual(mutations[0], ['distillProvider=prov', 'distillModel=m1'])
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: NO_ADAPTER blocks and re-asks the provider panel with the reason', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const llm = fakeLlm()
+    llm.validateError = (p) => {
+      const e = new Error(`no adapter registered for provider "${p}"`)
+      e.code = p === 'prov' ? 'NO_ADAPTER' : 'MODEL_NOT_FOUND'
+      return e
+    }
+    const ask = fakeAsk([
+      [{ id: 'mode', selected: ['local-only'] }],
+      [{ id: 'distill-provider', selected: ['prov'] }],
+      [{ id: 'distill-model', selected: ['m1'] }],
+      // Re-ask after NO_ADAPTER: pick the healthy provider this time.
+      [{ id: 'distill-provider', selected: ['zai-coding-cn'] }],
+      [{ id: 'distill-model', selected: ['glm-1'] }],
+      [{ id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
+      [{ id: 'confirm', selected: ['写入'] }],
+    ])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const r = await cmd.handler(inv('onboard'))
+    assert.equal(r.kind, 'success')
+    assert.equal(ask.calls.length, 7)
+    // Second provider panel carries the readable NO_ADAPTER notice.
+    assert.match(ask.calls[3].questions[0].detail, /⚠️ provider prov 当前没有可用的模型路由/)
+    assert.deepEqual(llm.validated, ['prov/m1', 'zai-coding-cn/glm-1'])
+    assert.deepEqual(mutations[0], ['distillProvider=zai-coding-cn', 'distillModel=glm-1'])
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: NO_ADAPTER every attempt fails the wizard with zero writes', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const llm = fakeLlm()
+    llm.validateError = () => {
+      const e = new Error('no adapter')
+      e.code = 'NO_ADAPTER'
+      return e
+    }
+    const answer = [{ id: 'distill-provider', selected: ['prov'] }, { id: 'distill-model', selected: ['m1'] }]
+    const ask = fakeAsk([[{ id: 'mode', selected: ['local-only'] }], answer, answer, answer, answer, answer, answer])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const r = await cmd.handler(inv('onboard'))
+    assert.equal(r.kind, 'error')
+    assert.match(r.text, /多次选择仍没有可用的模型路由/)
+    assert.match(r.text, /未写入任何改动/)
+    assert.equal(mutations.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: skip on the provider panel skips model panel and writes no distill keys', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const llm = fakeLlm()
+    const ask = fakeAsk([
+      [{ id: 'mode', selected: ['local-only'] }],
+      [{ id: 'distill-provider', selected: [SKIP] }],
+      [{ id: 'inject', selected: [] }, { id: 'observe', selected: ['关闭'] }],
+      [{ id: 'confirm', selected: ['写入'] }],
+    ])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const r = await cmd.handler(inv('onboard'))
+    assert.equal(r.kind, 'success')
+    assert.equal(ask.calls.length, 4, 'no model panel after skip')
+    assert.deepEqual(mutations[0], ['autoObserve=false'])
   } finally {
     cleanup()
   }
@@ -306,18 +471,21 @@ test('onboard interactive: local-only happy path asks 3 panels and writes the ba
 test('onboard interactive: github mode adds repo panel, custom answers win, agent is passed through', async () => {
   const { service, mutations, mutate, cleanup, getCfg } = makeService()
   try {
+    const llm = fakeLlm()
     const ask = fakeAsk([
       [{ id: 'mode', selected: ['GitHub 同步'] }],
-      [{ id: 'repo', custom: 'me/mine' }, { id: 'distill', custom: 'prov m1' }, { id: 'inject', selected: [] }, { id: 'observe', selected: ['关闭'] }],
+      [{ id: 'distill-provider', selected: ['prov'] }],
+      [{ id: 'distill-model', custom: 'm1' }],
+      [{ id: 'repo', custom: 'me/mine' }, { id: 'inject', selected: [] }, { id: 'observe', selected: ['关闭'] }],
       [{ id: 'confirm', selected: ['写入'] }],
     ])
-    const handler = createOnboardHandler(service, mutate, async () => 'someuser', () => ask)
+    const handler = createOnboardHandler(service, mutate, async () => "someuser", () => ask, () => [llm])
     const agent = { id: 'sess-1', session: { id: 'sess-1' } }
     const r = await handler([], invAgent('onboard', agent))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /已写入 llmwiki 配置（4 项）/)
     // The repo suggestion was computed from the injected login detector.
-    const batch = ask.calls[1].questions
+    const batch = ask.calls[3].questions
     const repoQ = batch.find((q) => q.id === 'repo')
     assert.equal(repoQ.options[0].label, 'someuser/dsh-wiki-memory')
     // The invocation's agent rides on every ask so session-owned surfaces can route it.
@@ -332,8 +500,9 @@ test('onboard interactive: github mode adds repo panel, custom answers win, agen
 test('onboard interactive: closed panel cancels with zero writes', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
+    const llm = fakeLlm()
     const ask = fakeAsk([[{ id: 'mode', selected: ['local-only'] }]])
-    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /已取消配置向导，未写入任何改动/)
@@ -346,8 +515,9 @@ test('onboard interactive: closed panel cancels with zero writes', async () => {
 test('onboard interactive: skipping the mode question ends the wizard', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
+    const llm = fakeLlm()
     const ask = fakeAsk([[{ id: 'mode', selected: [] }]])
-    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.match(r.text, /未选择存储模式/)
     assert.equal(ask.calls.length, 1)
@@ -360,12 +530,14 @@ test('onboard interactive: skipping the mode question ends the wizard', async ()
 test('onboard interactive: confirm-放弃 writes nothing', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
+    const llm = fakeLlm()
     const ask = fakeAsk([
       [{ id: 'mode', selected: ['local-only'] }],
+      [{ id: 'distill-provider', selected: [] }],
       [{ id: 'inject', selected: ['保守（topK 2 · 800 tok）'] }],
       [{ id: 'confirm', selected: ['放弃'] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.match(r.text, /已放弃/)
     assert.equal(mutations.length, 0)
@@ -377,11 +549,13 @@ test('onboard interactive: confirm-放弃 writes nothing', async () => {
 test('onboard interactive: invalid custom repo errors without writing', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
+    const llm = fakeLlm()
     const ask = fakeAsk([
       [{ id: 'mode', selected: ['GitHub 同步'] }],
+      [{ id: 'distill-provider', selected: [] }],
       [{ id: 'repo', custom: 'no-slash' }],
     ])
-    const handler = createOnboardHandler(service, mutate, async () => 'someuser', () => ask)
+    const handler = createOnboardHandler(service, mutate, async () => "someuser", () => ask, () => [llm])
     const r = await handler([], inv('onboard'))
     assert.equal(r.kind, 'error')
     assert.match(r.text, /owner\/name/)
@@ -395,14 +569,16 @@ test('onboard interactive: invalid custom repo errors without writing', async ()
 test('onboard interactive: every-batch-answer-skipped skips the confirm panel entirely', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
+    const llm = fakeLlm()
     const ask = fakeAsk([
       [{ id: 'mode', selected: ['local-only'] }],
-      [{ id: 'distill', selected: ['暂不开（推荐）'] }, { id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
+      [{ id: 'distill-provider', selected: [SKIP] }],
+      [{ id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.match(r.text, /没有选择任何改动/)
-    assert.equal(ask.calls.length, 2, 'no confirm panel when nothing is pending')
+    assert.equal(ask.calls.length, 3, 'no confirm panel when nothing is pending')
     assert.equal(mutations.length, 0)
   } finally {
     cleanup()
@@ -412,9 +588,23 @@ test('onboard interactive: every-batch-answer-skipped skips the confirm panel en
 test('onboard: without an ask provider the bare command falls back to the typed wizard', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate, () => undefined)
+    const llm = fakeLlm()
+    const cmd = buildWikiCommand(service, mutate, () => undefined, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.match(r.text, /配置向导（1\/4）/)
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard: without the llm directory the bare command falls back to the typed wizard even with ask', async () => {
+  const { service, mutate, cleanup } = makeService()
+  try {
+    const ask = fakeAsk([])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [])
+    const r = await cmd.handler(inv('onboard'))
+    assert.match(r.text, /配置向导（1\/4）/)
+    assert.equal(ask.calls.length, 0, 'no panels when the llm directory is missing')
   } finally {
     cleanup()
   }

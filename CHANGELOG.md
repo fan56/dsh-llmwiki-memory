@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- 蒸馏模型 ask-user 选择流：`/wiki onboard` 的蒸馏一步拆成两问——先问 provider（选项来自 `llm.listProviders()` 的活路由 + 「暂不启用蒸馏（跳过）」，每题 ≤10 个 option），答完再问该 provider 的 model（`llm.listModels()` 目录取前 8，detail 注明共 N 个、Other 手输兜底；provider→model 有依赖，两次独立 ask）。答案写入 pending 批量，经 `resolveModelInfo` 预校验：NO_ADAPTER 阻断并在面板上提示重选（有界重试），非 NO_ADAPTER 失败（模型目录外，可能仍可用）则警告放行（确认面板 detail 标注 ⚠️）。ask 面板或可用模型路由缺失的环境整体退回原文本向导（零新路径）。
+- `/wiki set` 交互式设置蒸馏路由：`/wiki set distill-provider` / `distill-model` 不带值且有 ask UI + 可用 llm 目录时弹对应单题面板（distill-model 先读当前 distill-provider 作为目录来源，未配 provider 提示先配）；带值仍走文本路径；取消/空答案零写入。面板选项与 onboard 主流程同级预校验（provider 须在活路由表中，model 经 `resolveModelInfo`——NO_ADAPTER 阻断重选，目录外警告放行）；面板不可用时返回错误提示、不再静默清空键值。
+- 修复 `/wiki set distill-model` 混写脏值根源：值形如 `provider model`（空格）或 `provider/model`（斜杠）时自动拆分并同时写入 `distill-provider` + `distill-model` 两个键（输出明确说明写了两个键），纯 model 名只写 `distill-model`；`distill-provider` 只接受单段（拒绝空格/斜杠）。拆分覆盖已有的不同 distill-provider 时输出 ⚠️ 覆盖提示。
+- 蒸馏选择面板的 llm 目录改为双源候选：`/wiki onboard` 与 `/wiki set` 依次探测会话级捕获实例与 apply 时 root 实例（与蒸馏 lane 共用同一 probe walker），取第一个 `listProviders()` 非空的实例——root 无适配器不再挡住可用的会话实例；均不可用时按场景提示（无可达实例→「本机未检测到可用模型路由」；有实例但列表空→「llm 服务在，但本机没有已启用的模型 provider」）。
+- 修复蒸馏 lane 在已释放会话作用域上的死实例调用：调 stream 前对候选实例（`llmRef.scoped` → `llmRef.root`）做廉价预校验——`listProviders()` 含 route.provider 的第一个实例胜出，作用域已释放（访问即抛）或不含该路由的实例跳过；全部不可用时不再把裸 NO_ADAPTER 写进 distill-state，而是记为 `model-error` 并按场景给可读中文 detail：有实例但均不含该路由→「distill-provider «X» 没有匹配的模型路由（检查拼写或本机 provider 配置），等待下次会话启动重试」；无可达实例→「没有可用的模型服务实例」。
+- 防御性兼容 `BlockAssembler.finish` 的字符串/对象两种形状：本机各 dsh-llm 副本与 harness 源码 assembler.ts:185-188 均为 `{kind:'stop'}` 对象，裸字符串形状未在任何已知版本观测到；此兼容未见实际触发，仅防御未来形状漂移。
+- 会话级注入去重：新增 `inject-dedup`（默认开）——同会话已实际注入过的 Topic 不再重注（runtime-context 快照与旧内容逐字节相同时不追加、一变旧快照留底，重注近乎纯冗余）。只有真正装箱进上下文的 slug 才记入会话注册表，被 total-budget 丢弃的不算（预算够时仍会注入）；注册表跨轮存活，仅 session/end-seed 与 agent/disposed 清除。被去重挡下的轮次记录 `injected: false` + `why: 'dedup'`，新增可选字段 `deduped` 列出被挡 slug；`/wiki stats` 的 Top-N 不再把被去重的 slug 计入注入数。`/wiki status` 注入旁新增去重状态行。已知取舍：topK 名额被去重占用时不 backfill（不从 near-miss 补位），见 ADR 0012。
+
 ## 0.2.1 (2026-09-01)
 
 - 子代理开关：新增 `include-subagents`（默认开，ADR 0011）——wiki 的注入与观察默认同样作用于子代理会话；设为 off 恢复 0.2.0 的隔离语义（子代理不注入、不观察、不触发蒸馏）。topic 工具不受开关影响。

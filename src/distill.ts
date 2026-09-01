@@ -239,19 +239,93 @@ export function parseOps(raw: string): DistillOp[] {
 }
 
 /**
+ * Minimal live-route probe surface, shared by the distill lane and the
+ * distill-route pickers: any llm-like service instance with an optional
+ * provider listing. A disposed scope throws on access.
+ */
+export interface LlmProbeShape {
+  listProviders?(): readonly { id: string }[]
+}
+
+/**
+ * A candidate llm instance plus the cheap liveness probe. `listProviders` is
+ * optional so bare fakes still work; when present it must list the route's
+ * provider for the instance to qualify.
+ */
+export interface LlmCandidateShape extends LlmProbeShape {
+  stream(options: unknown): AsyncIterable<unknown>
+}
+
+export interface LlmCandidatePick {
+  llm?: LlmProbeShape
+  /** How many candidates exposed a live route table (probe ran cleanly). */
+  probed: number
+}
+
+/**
+ * The one walker behind both llm-instance picks (distill lane + route pickers)
+ * so their semantics cannot drift: walk the candidates in priority order and
+ * return the first whose live route table satisfies `probe`, plus how many
+ * candidates were cleanly probed along the way (the caller uses that to tell
+ * 「有实例但不匹配」 apart from 「没有实例」). A disposed scope throws on
+ * access — that instance is skipped, not fatal. An instance WITHOUT the probe
+ * is accepted as-is: nothing to compare against.
+ */
+export function pickLlmCandidate(
+  candidates: readonly (LlmProbeShape | undefined)[],
+  probe: (providers: readonly { id: string }[]) => boolean,
+): LlmCandidatePick {
+  let probed = 0
+  for (const candidate of candidates) {
+    if (candidate === undefined) continue
+    try {
+      const providers = typeof candidate.listProviders === 'function' ? candidate.listProviders() : undefined
+      if (providers !== undefined) {
+        probed += 1
+        if (!probe(providers)) continue
+      }
+    } catch {
+      continue // disposed scope: even touching the service throws
+    }
+    return { llm: candidate, probed }
+  }
+  return { probed }
+}
+
+/**
+ * Cheap pre-flight for the distill lane: walk the candidates in priority order
+ * (session-scoped capture first, apply-time root second) and return the first
+ * instance whose live route table contains `provider`. Fails BEFORE calling
+ * stream, with the failure mode in the message: a reachable instance that
+ * lacks the route (scope released by a teardown, or a typo'd provider) says
+ * so; no reachable instance at all says that instead. The detail is readable
+ * Chinese: a dead/legacy instance is skipped when it can be probed;
+ * probe-less instances pass through and may still surface raw adapter errors.
+ */
+export function pickLiveLlm(candidates: readonly (LlmCandidateShape | undefined)[], provider: string): LlmCandidateShape {
+  const { llm, probed } = pickLlmCandidate(candidates, (providers) => providers.some((p) => p.id === provider))
+  if (llm !== undefined) return llm as LlmCandidateShape
+  if (probed > 0) {
+    throw new Error(`distill-provider «${provider}» 没有匹配的模型路由（检查拼写或本机 provider 配置），等待下次会话启动重试`)
+  }
+  throw new Error(`蒸馏模型路由 ${provider} 暂不可用：没有可用的模型服务实例（会话已结束或本机 llm 服务缺失）`)
+}
+
+/**
  * Default ModelCaller over the dsh LLM seam (`ctx.llm.stream` + BlockAssembler),
- * following dsh-session-title-llm's call policy. Returns undefined until the
- * llm service and a configured route both exist.
+ * following dsh-session-title-llm's call policy. `getCandidates` supplies the
+ * ordered instance candidates ([scoped, root] in production); the first one
+ * whose live routes contain the configured provider wins. Returns undefined
+ * until the llm service and a configured route both exist.
  */
 export function defaultModelCaller(
-  getLlm: () => { stream(options: unknown): AsyncIterable<unknown> } | undefined,
+  getCandidates: () => readonly (LlmCandidateShape | undefined)[],
   getRoute: () => { provider: string; model: string } | undefined,
 ): ModelCaller | undefined {
   return async (req) => {
-    const llm = getLlm()
     const route = getRoute()
     if (route === undefined) throw new Error('distill route not configured (set distill-provider and distill-model)')
-    if (llm === undefined) throw new Error('llm seam unavailable (ctx.llm missing)')
+    const llm = pickLiveLlm(getCandidates(), route.provider)
     const { BlockAssembler, createUserMessage, deepFreeze } = await import('@deepseek-ai/dsh-llm')
     const messages = [
       createUserMessage({
@@ -273,9 +347,14 @@ export function defaultModelCaller(
     for await (const chunk of llm.stream(options)) {
       ;(assembler as unknown as { push(c: unknown): void }).push(chunk)
     }
-    const finish = assembler.finish as { kind: string; failure?: { message: string } } | undefined
-    if (finish !== undefined && finish.kind !== 'stop') {
-      throw new Error(finish.failure?.message ?? `model finish: ${finish.kind}`)
+    // Defensive: tolerate both object {kind, ...} and bare-string finish
+    // shapes; the bare-string form has never been observed in any known
+    // dsh-llm version.
+    const finish = assembler.finish as string | { kind?: string; failure?: { message: string } } | undefined
+    const finishKind = typeof finish === 'string' ? finish : finish?.kind
+    const failure = typeof finish === 'object' && finish !== undefined ? finish.failure : undefined
+    if (finish !== undefined && finishKind !== 'stop') {
+      throw new Error(failure?.message ?? `model finish: ${String(finishKind)}`)
     }
     const blocks = assembler.blocks() as { type: string; text?: string }[]
     const text = blocks

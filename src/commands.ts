@@ -15,7 +15,19 @@ import { serializeTopicDoc, slugify, firstParagraph } from './okf.ts'
 import { buildGraph, renderGraphHtml } from './viz.ts'
 import { CONFIG_KEYS, displayKey, type ConfigKey, type LlmwikiConfigValue, parseConfigValue } from './config.ts'
 import { aggregateStats } from './ilog.ts'
-import { createOnboardHandler, type AskServiceResolver, type MutateFn } from './onboard.ts'
+import {
+  askDistillSingle,
+  createOnboardHandler,
+  llmDirectoryNotice,
+  makePanel,
+  parseDistillInput,
+  pickLlmDirectory,
+  type AskServiceResolver,
+  type AskServiceShape,
+  type LlmDirectoryResolver,
+  type LlmDirectoryShape,
+  type MutateFn,
+} from './onboard.ts'
 
 export const HELP = [
   'dsh-llmwiki-memory — OKF topic 记忆（本地 bundle，git 可追溯，可选 GitHub 同步）',
@@ -29,21 +41,22 @@ export const HELP = [
   '  /wiki sync [pull|push]    GitHub 模式：手动拉取/推送（默认模式自动）',
   '  /wiki config              查看当前配置',
   '  /wiki set <key> <value>   修改配置；key: ' + CONFIG_KEYS.join(' | '),
+  '  （distill-provider / distill-model 不带 value 且有 ask UI + 可用模型路由时弹选择面板；distill-model 支持 "provider model" 混写自动拆分）',
   '',
   '凭据：$GITHUB_TOKEN 或已登录的 gh CLI；登录不在本插件职责内。',
 ].join('\n')
 
-export function buildWikiCommand(service: WikiService, mutate: MutateFn, resolveAsk: AskServiceResolver = () => undefined): CommandDefinition {
-  const onboard = createOnboardHandler(service, mutate, undefined, resolveAsk)
+export function buildWikiCommand(service: WikiService, mutate: MutateFn, resolveAsk: AskServiceResolver = () => undefined, resolveLlm: LlmDirectoryResolver = () => []): CommandDefinition {
+  const onboard = createOnboardHandler(service, mutate, undefined, resolveAsk, resolveLlm)
   return {
     name: 'wiki',
     description: 'OKF topic 记忆：onboard | status | stats | list | show | history | graph | sync | config | set',
     input: { hint: '[onboard | status | stats | list | show <slug> | history <slug> | graph | sync [pull|push] | config | set <key> <value>]' },
-    handler: (invocation) => handle(invocation, service, mutate, onboard),
+    handler: (invocation) => handle(invocation, service, mutate, onboard, resolveAsk, resolveLlm),
   }
 }
 
-async function handle(invocation: CommandInvocation, service: WikiService, mutate: MutateFn, onboard: (args: string[], invocation: CommandInvocation) => Promise<CommandResult>): Promise<CommandResult> {
+async function handle(invocation: CommandInvocation, service: WikiService, mutate: MutateFn, onboard: (args: string[], invocation: CommandInvocation) => Promise<CommandResult>, resolveAsk: AskServiceResolver, resolveLlm: LlmDirectoryResolver): Promise<CommandResult> {
   const raw = invocation.rawInput.trim()
   const [action = '', ...rest] = raw.split(/\s+/)
   try {
@@ -69,7 +82,7 @@ async function handle(invocation: CommandInvocation, service: WikiService, mutat
       case 'config':
         return ok(renderConfig(service.cfg))
       case 'set':
-        return await doSet(service, rest, mutate)
+        return await doSet(service, rest, mutate, resolveAsk, resolveLlm, invocation)
       default:
         return fail(`未知子动作 “${action}”。\n\n${HELP}`)
     }
@@ -99,6 +112,7 @@ async function renderStatus(service: WikiService): Promise<string> {
     `  损坏文件：${s.broken.length === 0 ? '无' : s.broken.join('、')}`,
     `  git：${s.git ? `是（HEAD ${s.head?.slice(0, 10) ?? '??'}）` : '否'}`,
     `  注入：${cfg.autoInject ? `开（topK ${cfg.topK}，预算 ${cfg.totalBudget} tok，阈值 ${cfg.matchThreshold}）` : '关'}`,
+    `  去重：${cfg.injectDedup ? '开（同会话已注入的 Topic 不重注）' : '关'}`,
     `  蒸馏：${cfg.distillProvider !== '' && cfg.distillModel !== '' ? `${cfg.distillProvider}/${cfg.distillModel}，每 ${cfg.distillEveryTurns} 轮` : '未配置模型（/wiki set distill-provider / distill-model）'}`,
   ]
   if (service.sync !== undefined) {
@@ -241,10 +255,48 @@ function renderConfig(cfg: LlmwikiConfigValue): string {
   return lines.join('\n')
 }
 
+/**
+ * One ask-user panel for `/wiki set distill-provider|distill-model` without a
+ * value. Picks are pre-validated like the onboard wizard (live-route check
+ * for providers; resolveModelInfo for models — NO_ADAPTER blocks, off-catalog
+ * warns but allows). Cancellation and blank answers write nothing;
+ * ASK_CANCELLED / ASK_ABORTED surface as a clean no-write success.
+ */
+async function setDistillInteractive(
+  service: WikiService,
+  key: 'distillProvider' | 'distillModel',
+  ask: AskServiceShape,
+  llm: LlmDirectoryShape,
+  mutate: (ops: readonly { op: 'set'; path: string[]; value: unknown }[]) => Promise<void>,
+  invocation: CommandInvocation | undefined,
+): Promise<CommandResult> {
+  const fail = (text: string): CommandResult => ({ kind: 'error', text })
+  if (key === 'distillModel' && service.cfg.distillProvider === '') {
+    return fail('请先配置 distill-provider 再选模型：/wiki set distill-provider（有 UI 时会弹 provider 选择面板）')
+  }
+  const invocationLike = invocation as { agent?: unknown; signal?: AbortSignal }
+  const panel = makePanel(ask, invocationLike.agent, invocationLike.signal)
+  const askKey = key === 'distillProvider' ? 'distill-provider' : 'distill-model'
+  try {
+    const picked = await askDistillSingle(llm, panel, askKey, service.cfg)
+    if (picked === undefined) return ok('未选择，配置保持原样。')
+    await mutate([{ op: 'set', path: [key], value: picked.value }])
+    return ok(`✅ llmwiki.${displayKey(key)} = ${picked.value}${picked.warning === undefined ? '' : `\n⚠️ ${picked.warning}`}`)
+  } catch (error) {
+    const code = (error as { code?: string }).code
+    if (code === 'ASK_CANCELLED' || code === 'ASK_ABORTED') return ok('已取消，未写入任何改动。')
+    if (code === 'ASK_MISSING_AGENT') return fail('当前 surface 的 ask-user 需要会话上下文。请改用 /wiki set 带值输入。')
+    throw error
+  }
+}
+
 async function doSet(
   service: WikiService,
   tokens: string[],
   mutate: (ops: readonly { op: 'set'; path: string[]; value: unknown }[]) => Promise<void>,
+  resolveAsk: AskServiceResolver = () => undefined,
+  resolveLlm: LlmDirectoryResolver = () => [],
+  invocation?: CommandInvocation,
 ): Promise<CommandResult> {
   const [rawKey = '', ...valueParts] = tokens
   const rawValue = valueParts.join(' ').trim()
@@ -252,6 +304,41 @@ async function doSet(
   const key = CONFIG_KEYS.find((k) => k.toLowerCase() === normalized)
   if (key === undefined) {
     return fail(`未知配置项 “${rawKey}”。可选：${CONFIG_KEYS.map(displayKey).join('、')}`)
+  }
+  // No value → a single-question picker for the two distill route keys when a
+  // live UI AND a usable llm directory exist. Every other shape errors out:
+  // falling through to the typed path would silently CLEAR the key.
+  if ((key === 'distillProvider' || key === 'distillModel') && rawValue === '') {
+    const ask = resolveAsk()
+    const pick = pickLlmDirectory(resolveLlm())
+    if (ask !== undefined && typeof ask.ask === 'function' && pick.kind === 'ok') {
+      return setDistillInteractive(service, key, ask, pick.llm, mutate, invocation)
+    }
+    const reason = llmDirectoryNotice(pick) ?? '当前 surface 没有 ask-user 面板'
+    return fail(`${displayKey(key)} 需要一个值（如 /wiki set distill-model zai-coding-cn glm-4.7-air），未写入任何改动。选择面板不可用：${reason}`)
+  }
+  // Mixed "provider model" / "provider/model" values for distill-model split
+  // into BOTH keys — the historical root of `distillModel: "prov model"` dirt.
+  // Splitting overwrites distill-provider; when that key already held a
+  // different provider, say so.
+  if (key === 'distillModel' && rawValue !== '' && /[\s/]/.test(rawValue)) {
+    const parsed = parseDistillInput(rawValue)
+    if ('error' in parsed) return fail(parsed.error)
+    const previousProvider = service.cfg.distillProvider
+    await mutate([
+      { op: 'set', path: ['distillProvider'], value: parsed.provider },
+      { op: 'set', path: ['distillModel'], value: parsed.model },
+    ])
+    const overwrote = previousProvider !== '' && previousProvider !== parsed.provider
+    return ok([
+      `✅ llmwiki.distill-provider = ${parsed.provider}`,
+      `✅ llmwiki.distill-model = ${parsed.model}`,
+      '（混写值已拆分写入 distill-provider 与 distill-model 两个键）',
+      ...(overwrote ? [`⚠️ 已覆盖原 distill-provider «${previousProvider}»`] : []),
+    ].join('\n'))
+  }
+  if (key === 'distillProvider' && rawValue !== '' && /[\s/]/.test(rawValue)) {
+    return fail('distill-provider 只接受单段 provider id（不含空格或斜杠）。混合值请用 /wiki set distill-model "provider model" 一次写入两个键。')
   }
   const parsed = parseConfigValue(key, rawValue)
   if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) return fail(parsed.error)

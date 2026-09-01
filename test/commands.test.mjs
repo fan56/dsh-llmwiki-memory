@@ -11,7 +11,7 @@ function makeService(cfgOverrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'llmwiki-cmd-'))
   const store = new BundleStore(root)
   let cfg = {
-    repo: '', autoInject: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
+    repo: '', autoInject: true, injectDedup: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
     matchThreshold: 0.3, tagBoost: 0.15, graphDepth: 2, recencyWindowDays: 7,
     autoObserve: true, observationMaxChars: 2000, distillEveryTurns: 20,
     distillOnSessionEnd: true, distillProvider: '', distillModel: '', pushDebounceSeconds: 45,
@@ -24,10 +24,49 @@ function makeService(cfgOverrides = {}) {
     for (const op of ops) cfg = { ...cfg, [op.path[0]]: op.value }
   }
   const cleanup = () => rmSync(root, { recursive: true, force: true })
-  return { store, service, mutations, mutate, cleanup, setCfg: (patch) => { cfg = { ...cfg, ...patch } } }
+  return { store, service, mutations, mutate, cleanup, setCfg: (patch) => { cfg = { ...cfg, ...patch } }, getCfg: () => cfg }
 }
 
 const inv = (rawInput) => ({ rawInput, signal: undefined })
+
+/** Scripted ask-user provider: pops one answer batch per ask() call. */
+function fakeAsk(script) {
+  const calls = []
+  return {
+    calls,
+    ask: async (req) => {
+      calls.push(req)
+      const next = script.shift()
+      if (next === undefined) {
+        const err = new Error('panel closed')
+        err.code = 'ASK_CANCELLED'
+        throw err
+      }
+      return { answers: next }
+    },
+  }
+}
+
+/** Mock llm directory for the distill pickers. */
+function fakeLlm() {
+  const llm = {
+    providers: [{ id: 'prov', name: 'Prov One' }, { id: 'zai-coding-cn', name: 'Zai Coding' }],
+    modelsByProvider: { prov: [{ provider: 'prov', id: 'm1', name: 'M1' }, { provider: 'prov', id: 'm2', name: 'M2' }] },
+    validated: [],
+    validateError: undefined, // optional fn(provider, model) → thrown error
+    listProviders() { return llm.providers },
+    listModels: async (p) => llm.modelsByProvider[p] ?? [],
+    resolveModelInfo: async (p, m) => {
+      llm.validated.push(`${p}/${m}`)
+      if (llm.validateError !== undefined) {
+        const err = llm.validateError(p, m)
+        if (err !== undefined) throw err
+      }
+      return { provider: p, id: m, name: m }
+    },
+  }
+  return llm
+}
 
 test('command: bare /wiki prints help', async () => {
   const { service, mutate, cleanup } = makeService()
@@ -52,6 +91,7 @@ test('command: status shows mode, counts, injection settings', async () => {
     assert.match(r.text, /local-only/)
     assert.match(r.text, /Topics：0/)
     assert.match(r.text, /topK 4/)
+    assert.match(r.text, /去重：开/)
   } finally {
     cleanup()
   }
@@ -135,7 +175,7 @@ test('command: config lists all keys; set validates and applies', async () => {
   try {
     const cmd = buildWikiCommand(service, mutate)
     const cfgOut = await cmd.handler(inv('config'))
-    for (const key of ['repo', 'match-threshold', 'distill-model', 'push-debounce-seconds']) {
+    for (const key of ['repo', 'inject-dedup', 'match-threshold', 'distill-model', 'push-debounce-seconds']) {
       assert.match(cfgOut.text, new RegExp(key.replace(/-/g, '\\-')))
     }
     const bad = await cmd.handler(inv('set repo not-a-repo'))
@@ -152,6 +192,10 @@ test('command: config lists all keys; set validates and applies', async () => {
     assert.match(sa.text, /include-subagents = false/)
     const saOn = await cmd.handler(inv('set include-subagents on'))
     assert.match(saOn.text, /include-subagents = true/)
+    const dd = await cmd.handler(inv('set inject-dedup off'))
+    assert.match(dd.text, /inject-dedup = false/)
+    const ddOn = await cmd.handler(inv('set inject-dedup on'))
+    assert.match(ddOn.text, /inject-dedup = true/)
     const off = await cmd.handler(inv('set autoinject off'))
     assert.match(off.text, /false/)
     const badBool = await cmd.handler(inv('set autoinject maybe'))
@@ -168,6 +212,292 @@ test('command: unknown subaction errors with help', async () => {
     const r = await cmd.handler(inv('frobnicate'))
     assert.equal(r.kind, 'error')
     assert.match(r.text, /\/wiki status/)
+  } finally {
+    cleanup()
+  }
+})
+
+// ---- /wiki set: distill-route text path (C — mixed-value split) ----
+
+test('set distill-model: "provider model" space form splits into BOTH keys', async () => {
+  const { service, mutations, mutate, cleanup, getCfg } = makeService()
+  try {
+    const cmd = buildWikiCommand(service, mutate)
+    const r = await cmd.handler(inv('set distill-model zai-coding-cn glm-5.3-flash'))
+    assert.equal(r.kind, 'success')
+    assert.match(r.text, /distill-provider = zai-coding-cn/)
+    assert.match(r.text, /distill-model = glm-5\.3-flash/)
+    assert.match(r.text, /两个键/)
+    assert.equal(mutations.length, 1)
+    assert.deepEqual(mutations[0].map((o) => o.path[0]), ['distillProvider', 'distillModel'])
+    assert.equal(getCfg().distillProvider, 'zai-coding-cn')
+    assert.equal(getCfg().distillModel, 'glm-5.3-flash')
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill-model: provider/model slash form splits too; nested-slash models need the space form', async () => {
+  const { service, mutations, mutate, cleanup, getCfg } = makeService()
+  try {
+    const cmd = buildWikiCommand(service, mutate)
+    const slash = await cmd.handler(inv('set distill-model prov/m1'))
+    assert.match(slash.text, /distill-provider = prov/)
+    assert.equal(getCfg().distillModel, 'm1')
+    // Space form wins so the model id itself may contain slashes.
+    const nested = await cmd.handler(inv('set distill-model openrouter meta-llama/llama-3'))
+    assert.equal(getCfg().distillProvider, 'openrouter')
+    assert.equal(getCfg().distillModel, 'meta-llama/llama-3')
+    assert.equal(mutations.length, 2)
+    for (const batch of mutations) assert.deepEqual(batch.map((o) => o.path[0]), ['distillProvider', 'distillModel'])
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill-model: bare model name writes only distill-model', async () => {
+  const { service, mutations, mutate, cleanup, getCfg } = makeService()
+  try {
+    const cmd = buildWikiCommand(service, mutate)
+    const r = await cmd.handler(inv('set distill-model glm-5.3-flash'))
+    assert.equal(r.kind, 'success')
+    assert.doesNotMatch(r.text, /两个键/)
+    assert.deepEqual(mutations[0].map((o) => o.path[0]), ['distillModel'])
+    assert.equal(getCfg().distillModel, 'glm-5.3-flash')
+    assert.equal(getCfg().distillProvider, '')
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill-provider: only a single segment is accepted', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const cmd = buildWikiCommand(service, mutate)
+    const spaced = await cmd.handler(inv('set distill-provider zai-coding-cn glm-5.3-flash'))
+    assert.equal(spaced.kind, 'error')
+    assert.match(spaced.text, /单段/)
+    const slashed = await cmd.handler(inv('set distill-provider prov/model'))
+    assert.equal(slashed.kind, 'error')
+    const good = await cmd.handler(inv('set distill-provider zai-coding-cn'))
+    assert.equal(good.kind, 'success')
+    assert.deepEqual(mutations[0].map((o) => o.path[0]), ['distillProvider'])
+    assert.equal(mutations.length, 1)
+  } finally {
+    cleanup()
+  }
+})
+
+// ---- /wiki set: distill-route interactive path (B) ----
+
+test('set distill-provider without value opens the provider panel and writes the pick', async () => {
+  const { service, mutations, mutate, cleanup, getCfg } = makeService()
+  try {
+    const ask = fakeAsk([[{ id: 'distill-provider', selected: ['prov'] }]])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [fakeLlm()])
+    const r = await cmd.handler(inv('set distill-provider'))
+    assert.equal(r.kind, 'success')
+    assert.match(r.text, /distill-provider = prov/)
+    assert.equal(ask.calls.length, 1)
+    assert.equal(ask.calls[0].questions[0].id, 'distill-provider')
+    assert.deepEqual(ask.calls[0].questions[0].options.map((o) => o.label), ['prov', 'zai-coding-cn'])
+    assert.deepEqual(mutations[0].map((o) => o.path[0]), ['distillProvider'])
+    assert.equal(getCfg().distillProvider, 'prov')
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill-model without value lists the configured provider models; needs provider first', async () => {
+  const { service, mutations, mutate, cleanup, setCfg, getCfg } = makeService()
+  try {
+    const ask = fakeAsk([[{ id: 'distill-model', selected: ['m2'] }]])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [fakeLlm()])
+    const noProvider = await cmd.handler(inv('set distill-model'))
+    assert.equal(noProvider.kind, 'error')
+    assert.match(noProvider.text, /先配置 distill-provider/)
+    assert.equal(ask.calls.length, 0)
+    setCfg({ distillProvider: 'prov' })
+    const r = await cmd.handler(inv('set distill-model'))
+    assert.equal(r.kind, 'success')
+    assert.match(r.text, /distill-model = m2/)
+    assert.equal(ask.calls[0].questions[0].id, 'distill-model')
+    assert.deepEqual(ask.calls[0].questions[0].options.map((o) => o.label), ['m1', 'm2'])
+    assert.deepEqual(mutations[0].map((o) => o.path[0]), ['distillModel'])
+    assert.equal(getCfg().distillModel, 'm2')
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill interactive: cancel and blank answer write nothing', async () => {
+  const { service, mutations, mutate, cleanup, setCfg } = makeService()
+  try {
+    setCfg({ distillProvider: 'prov' })
+    const cancelled = fakeAsk([])
+    const cmd = buildWikiCommand(service, mutate, () => cancelled, () => [fakeLlm()])
+    const r = await cmd.handler(inv('set distill-model'))
+    assert.equal(r.kind, 'success')
+    assert.match(r.text, /已取消/)
+    assert.equal(mutations.length, 0)
+    const blank = fakeAsk([[{ id: 'distill-provider', selected: [] }]])
+    const cmd2 = buildWikiCommand(service, mutate, () => blank, () => [fakeLlm()])
+    const r2 = await cmd2.handler(inv('set distill-provider'))
+    assert.equal(r2.kind, 'success')
+    assert.match(r2.text, /保持原样/)
+    assert.equal(mutations.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill keys without value and without llm error out instead of clearing the key', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const ask = fakeAsk([])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [])
+    const r = await cmd.handler(inv('set distill-provider'))
+    assert.equal(r.kind, 'error')
+    assert.match(r.text, /需要一个值/)
+    assert.match(r.text, /本机未检测到可用模型路由/)
+    assert.equal(ask.calls.length, 0, 'no panel without the llm directory')
+    assert.equal(mutations.length, 0, 'never silently clears the key')
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill keys without value: empty llm directory gets its own message', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const emptyLlm = { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}) }
+    const cmd = buildWikiCommand(service, mutate, () => fakeAsk([]), () => [emptyLlm])
+    const r = await cmd.handler(inv('set distill-provider'))
+    assert.equal(r.kind, 'error')
+    assert.match(r.text, /需要一个值/)
+    assert.match(r.text, /没有已启用的模型 provider/)
+    assert.equal(mutations.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill-provider without value picks the first candidate with a non-empty route table', async () => {
+  const { service, mutations, mutate, cleanup, getCfg } = makeService()
+  try {
+    // root first but route-less, scoped second and live → the live one wins.
+    const rootEmpty = { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}) }
+    const scopedLive = {
+      listProviders: () => [{ id: 'scoped-prov', name: 'Scoped' }],
+      listModels: async () => [{ provider: 'scoped-prov', id: 'sm1', name: 'SM1' }],
+      resolveModelInfo: async (p, m) => ({ provider: p, id: m }),
+    }
+    const ask = fakeAsk([[{ id: 'distill-provider', selected: ['scoped-prov'] }]])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [rootEmpty, scopedLive])
+    const r = await cmd.handler(inv('set distill-provider'))
+    assert.equal(r.kind, 'success')
+    assert.match(r.text, /distill-provider = scoped-prov/)
+    assert.deepEqual(ask.calls[0].questions[0].options.map((o) => o.label), ['scoped-prov'])
+    assert.equal(getCfg().distillProvider, 'scoped-prov')
+  } finally {
+    cleanup()
+  }
+})
+
+// ---- /wiki set: distill-route panel validation (mirrors the wizard) ----
+
+test('set distill-provider custom id outside the route table blocks and re-asks', async () => {
+  const { service, mutations, mutate, cleanup, getCfg } = makeService()
+  try {
+    const ask = fakeAsk([
+      [{ id: 'distill-provider', custom: 'no-such-prov' }],
+      [{ id: 'distill-provider', selected: ['prov'] }],
+    ])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [fakeLlm()])
+    const r = await cmd.handler(inv('set distill-provider'))
+    assert.equal(r.kind, 'success')
+    assert.equal(ask.calls.length, 2)
+    assert.match(ask.calls[1].questions[0].detail, /⚠️ provider no-such-prov 当前没有可用的模型路由/)
+    assert.equal(getCfg().distillProvider, 'prov')
+    assert.equal(mutations.length, 1)
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill-provider custom id: exhausting re-asks fails with zero writes', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const answer = [{ id: 'distill-provider', custom: 'no-such-prov' }]
+    const ask = fakeAsk([answer, answer, answer])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [fakeLlm()])
+    const r = await cmd.handler(inv('set distill-provider'))
+    assert.equal(r.kind, 'error')
+    assert.match(r.text, /多次选择仍没有可用的模型路由/)
+    assert.equal(mutations.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('set distill-model: NO_ADAPTER blocks and re-asks; off-catalog failure warns but writes', async () => {
+  const { service, mutations, mutate, cleanup, setCfg, getCfg } = makeService()
+  try {
+    setCfg({ distillProvider: 'prov' })
+    // NO_ADAPTER on the model check → block + re-ask (only m1 is blocked).
+    const blocked = fakeLlm()
+    blocked.validateError = (p, m) => {
+      if (m !== 'm1') return undefined
+      const e = new Error('no adapter registered for provider "prov"')
+      e.code = 'NO_ADAPTER'
+      return e
+    }
+    const ask = fakeAsk([[{ id: 'distill-model', selected: ['m1'] }], [{ id: 'distill-model', selected: ['m2'] }]])
+    const cmd = buildWikiCommand(service, mutate, () => ask, () => [blocked])
+    const r = await cmd.handler(inv('set distill-model'))
+    assert.equal(r.kind, 'success')
+    assert.equal(ask.calls.length, 2)
+    assert.match(ask.calls[1].questions[0].detail, /⚠️ provider prov 当前没有可用的模型路由/)
+    assert.equal(getCfg().distillModel, 'm2')
+    // Off-catalog failure (non-NO_ADAPTER) → warn but allow.
+    const advisory = fakeLlm()
+    advisory.validateError = () => {
+      const e = new Error('model not in catalog')
+      e.code = 'MODEL_NOT_FOUND'
+      return e
+    }
+    const ask2 = fakeAsk([[{ id: 'distill-model', custom: 'weird-model' }]])
+    const cmd2 = buildWikiCommand(service, mutate, () => ask2, () => [advisory])
+    const r2 = await cmd2.handler(inv('set distill-model'))
+    assert.equal(r2.kind, 'success')
+    assert.match(r2.text, /⚠️ weird-model 未通过 prov 的模型目录校验（模型目录外，可能仍可用），已放行/)
+    assert.equal(getCfg().distillModel, 'weird-model')
+    assert.equal(mutations.length, 2)
+  } finally {
+    cleanup()
+  }
+})
+
+// ---- /wiki set: mixed-value split overwrite notice ----
+
+test('set distill-model split warns when it overwrites an existing distill-provider', async () => {
+  const { service, mutations, mutate, cleanup, setCfg, getCfg } = makeService()
+  try {
+    setCfg({ distillProvider: 'old-prov' })
+    const cmd = buildWikiCommand(service, mutate)
+    const r = await cmd.handler(inv('set distill-model new-prov m1'))
+    assert.equal(r.kind, 'success')
+    assert.match(r.text, /⚠️ 已覆盖原 distill-provider «old-prov»/)
+    assert.equal(getCfg().distillProvider, 'new-prov')
+    // Same provider → no warning; empty previous provider → no warning either.
+    const same = await cmd.handler(inv('set distill-model new-prov m2'))
+    assert.doesNotMatch(same.text, /已覆盖/)
+    assert.equal(getCfg().distillModel, 'm2')
+    setCfg({ distillProvider: '' })
+    const fresh = await cmd.handler(inv('set distill-model zai-coding-cn glm-5'))
+    assert.doesNotMatch(fresh.text, /已覆盖/)
+    assert.equal(getCfg().distillProvider, 'zai-coding-cn')
+    assert.equal(mutations.length, 3)
   } finally {
     cleanup()
   }

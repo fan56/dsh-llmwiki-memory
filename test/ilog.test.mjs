@@ -37,6 +37,23 @@ test('aggregateStats: hit rate, zero-hit rounds, avg hits', () => {
   assert.equal(s.avgBudgetUtilization, 400)
 })
 
+test('aggregateStats: deduped hits stay out of topTopics, keep retrieval metrics', () => {
+  const records = [
+    rec({ hits: [{ slug: 'a', score: 1, reasons: [], viaGraph: false }], injected: true }),
+    // All-hit dedup round: 'a' was NOT injected → must not count as a hit for topTopics…
+    rec({ hits: [{ slug: 'a', score: 0.9, reasons: [], viaGraph: false }], injected: false, why: 'dedup', deduped: ['a'] }),
+    // …nor in the mixed round, while non-deduped 'b' counts. Raw-hit metrics
+    // (avgHitsPerRound, zeroHitRounds) keep describing retrieval, not injection.
+    rec({ hits: [{ slug: 'a', score: 0.9, reasons: [], viaGraph: false }, { slug: 'b', score: 0.5, reasons: [], viaGraph: false }], injected: true, deduped: ['a'] }),
+  ]
+  const s = aggregateStats(records)
+  // 'a' appears in all three rounds but only round 1 actually injected it —
+  // without the dedup exclusion its count would be 3.
+  assert.equal(s.topTopics.find((t) => t.slug === 'a').count, 1)
+  assert.equal(s.topTopics.find((t) => t.slug === 'b').count, 1)
+  assert.equal(s.avgHitsPerRound, 1.33)
+})
+
 test('aggregateStats: near-miss histogram ordered by bucket', () => {
   const records = [
     rec({ nearMisses: [{ slug: 'x', score: 0.22 }, { slug: 'y', score: 0.24 }] }),

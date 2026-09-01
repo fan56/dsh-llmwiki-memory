@@ -59,6 +59,7 @@ First-time setup belongs to `/wiki onboard`; day-to-day tuning is `/wiki set <ke
 |---|---|---|
 | `repo` | empty (local-only) | GitHub sync repo `owner/name`; suggested `dsh-wiki-memory`; empty = back to local-only |
 | `autoInject` | `true` | Per-turn injection master switch |
+| `injectDedup` | `true` | Session-level injection dedup: topics already injected in this session are not re-injected (registry cleared at session end; budget-dropped topics stay injectable; deduped topK slots are NOT backfilled) — ADR 0012 |
 | `topK` | `4` | Max topics injected per turn |
 | `perTopicBudget` | `300` | Per-topic digest token budget |
 | `totalBudget` | `1500` | Total injection budget per turn |
@@ -69,7 +70,7 @@ First-time setup belongs to `/wiki onboard`; day-to-day tuning is `/wiki set <ke
 | `autoObserve` | `true` | Capture atomic observations every turn |
 | `includeSubagents` | `true` | Whether injection and observation also engage subagent sessions (ADR 0011); `off` skips them entirely |
 | `observationMaxChars` | `2000` | Per-side per-turn observation truncation |
-| `distillProvider` / `distillModel` | empty (distill off) | Distill lane model route; both must be set to enable |
+| `distillProvider` / `distillModel` | empty (distill off) | Distill lane model route; both must be set to enable. With a UI, `/wiki set distill-provider` / `distill-model` without a value opens a picker panel (provider list → that provider's model catalog); a mixed `provider model` / `provider/model` value for `distill-model` splits into both keys |
 | `distillEveryTurns` | `20` | Distill every N turns of a long session |
 | `distillOnSessionEnd` | `true` | Distill once when a session ends |
 | `pushDebounceSeconds` | `45` | GitHub-mode debounced push interval |
@@ -89,11 +90,12 @@ This project's shape is directly inspired and supported by:
 - **Subagents engage memory by default — one switch to opt out**: by default (`include-subagents` on), injection and observation apply to subagent sessions too. `/wiki set include-subagents off` skips delegated sessions entirely — no injection, no observation, no distill triggers; the topic tools stay on the global layer, so an explicit `topic_save` from a child still lands. Out-of-process subagents (claude-code/codex providers) never load this plugin anyway.
 - **Session-end distill in headless one-shot sessions**: the distill lane runs asynchronously after turn/end fires, and a headless process exits right after answering — a real model call (seconds) mostly loses the race against process exit. Multi-turn long sessions (tui/web) are unaffected for the every-N-turns distill; `meta/distill-state.json` records each lane's outcome, checkable via `/wiki status`.
 - **Config read timing**: `/wiki set` and `settings.yaml` edits take effect most reliably from the next session start.
+- **Picking a distill model**: `/wiki onboard` splits the distill decision into two dependent questions (provider first, then that provider's model catalog), pre-validated with `resolveModelInfo` — a provider with no live route blocks and re-asks, an off-catalog model (a non-NO_ADAPTER failure: outside the advisory catalog, possibly still usable) warns but is allowed; hosts without an ask UI or a usable model route fall back to typed input. The same validation backs the `/wiki set` picker panels.
 
 ## Design docs
 
 - [CONTEXT.md](CONTEXT.md) — domain glossary
-- [docs/adr/](docs/adr/) — 0001–0011: OKF compliance, remote shape, sync strategy, two-stage observer, bundle layout, injection defaults, observability & tunables, dual-mode persistence, onboarding wizard, subagent isolation, the include-subagents switch
+- [docs/adr/](docs/adr/) — 0001–0012: OKF compliance, remote shape, sync strategy, two-stage observer, bundle layout, injection defaults, observability & tunables, dual-mode persistence, onboarding wizard, subagent isolation, the include-subagents switch, injection dedup default-on
 
 ## License
 

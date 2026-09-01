@@ -19,6 +19,7 @@
 import { spawn } from 'node:child_process'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { WikiService } from './service.ts'
+import { pickLlmCandidate } from './distill.ts'
 import { CONFIG_KEYS, parseConfigValue, type LlmwikiConfigValue } from './config.ts'
 
 /** CamelCase → dash-display, shared with /wiki config rendering. */
@@ -105,6 +106,7 @@ export function renderStep(state: OnboardState, cfg: LlmwikiConfigValue): string
       return [
         header(state, '注入档位'),
         `当前：topK ${cur.topK} / 总预算 ${cur.totalBudget} tok / 阈值 ${cur.matchThreshold}`,
+        `会话级去重：${cur.injectDedup ? '开（同会话已注入的 Topic 不重注）' : '关'}`,
         '  a. 保守 —— topK 2，总预算 800 tok（少而准，token 敏感选这个）',
         '  b. 标准 —— topK 4，总预算 1500 tok（默认，推荐）',
         '  c. 放量 —— topK 6，总预算 2500 tok（记忆多、上下文宽裕）',
@@ -161,25 +163,11 @@ export function applyAnswer(state: OnboardState, answer: string, cfg: LlmwikiCon
     }
     case 'distill': {
       if (letter === 'a' || letter === 'c') return { state: next({ step: 'inject' }) }
-      // Space form wins so model ids may themselves contain slashes
-      // (`openrouter meta-llama/llama-3`); bare `provider/model` still works.
-      let provider: string
-      let model: string
-      if (/\s/.test(answer.trim())) {
-        const split = answer.trim().split(/\s+/)
-        provider = split[0] ?? ''
-        model = split.slice(1).join(' ')
-      } else {
-        const slash = answer.indexOf('/')
-        provider = slash === -1 ? answer : answer.slice(0, slash)
-        model = slash === -1 ? '' : answer.slice(slash + 1)
-      }
-      provider = provider.trim()
-      model = model.trim()
-      if (provider === '' || model === '' || /\s/.test(provider) || /\s/.test(model)) {
-        return { state, error: '蒸馏模型格式：provider model（空格分隔）或 provider/model（斜杠分隔），如 zai-coding-cn glm-4.7-air' }
-      }
-      return { state: next({ step: 'inject', pending: { ...state.pending, distillProvider: provider, distillModel: model } }) }
+      // Shared with the /wiki set mixed-value split: space form wins so model
+      // ids may themselves contain slashes (`openrouter meta-llama/llama-3`).
+      const parsed = parseDistillInput(answer)
+      if ('error' in parsed) return { state, error: parsed.error }
+      return { state: next({ step: 'inject', pending: { ...state.pending, distillProvider: parsed.provider, distillModel: parsed.model } }) }
     }
     case 'inject': {
       if (letter === 'a') return { state: next({ step: 'observe', pending: { ...state.pending, topK: 2, totalBudget: 800 } }) }
@@ -275,6 +263,68 @@ export interface AskServiceShape {
 
 export type AskServiceResolver = () => AskServiceShape | undefined
 
+/** Structural view of the dsh llm service used for distill-route pickers. */
+export interface LlmDirectoryShape {
+  /** Live routes only (providers with a registered adapter), in registration order. */
+  listProviders(): readonly { id: string; name: string }[]
+  /** Advisory catalog; an unlisted model id may still be usable. */
+  listModels(provider: string): Promise<readonly { provider: string; id: string; name: string; description?: string }[]>
+  /** Pure in-memory exact-route check; rejects with coded errors (e.g. NO_ADAPTER). */
+  resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<unknown>
+}
+
+/**
+ * Ordered llm candidates for the distill pickers: session-scoped capture
+ * first (the instance this session's own loop streams through), apply-time
+ * root second. Consumers pick with `pickLlmDirectory` — the first candidate
+ * whose `listProviders()` is non-empty wins — so neither source's emptiness
+ * shadows the other.
+ */
+export type LlmDirectoryResolver = () => readonly (LlmDirectoryShape | undefined)[]
+
+/** Where the candidate walk for the distill pickers landed. */
+export type LlmDirectoryPick =
+  | { kind: 'ok'; llm: LlmDirectoryShape }
+  | { kind: 'empty-directory' }
+  | { kind: 'no-instance' }
+
+/**
+ * First candidate with a non-empty live route table wins. Distinguishes
+ * 「有实例但列表空」(service present, zero enabled providers) from
+ * 「均不可用」(nothing reachable) so each gets its own user hint.
+ */
+export function pickLlmDirectory(candidates: readonly (LlmDirectoryShape | undefined)[]): LlmDirectoryPick {
+  const { llm, probed } = pickLlmCandidate(candidates, (providers) => providers.length > 0)
+  if (llm !== undefined) return { kind: 'ok', llm: llm as LlmDirectoryShape }
+  return probed > 0 ? { kind: 'empty-directory' } : { kind: 'no-instance' }
+}
+
+/** One-line why-not for the distill pick panels; undefined when usable. */
+export function llmDirectoryNotice(pick: LlmDirectoryPick): string | undefined {
+  if (pick.kind === 'ok') return undefined
+  if (pick.kind === 'empty-directory') {
+    return 'llm 服务在，但本机没有已启用的模型 provider（先在 dsh 配置中启用模型适配器）'
+  }
+  return '本机未检测到可用模型路由（llm 服务缺失或会话作用域已释放）'
+}
+
+/** Build one ask() closure that rides the invocation's agent/signal context. */
+export function makePanel(
+  ask: AskServiceShape,
+  agent: unknown,
+  signal: AbortSignal | undefined,
+): (questions: AskItemShape[]) => Promise<AskAnswerItemShape[]> {
+  return async (questions) => {
+    const r = await ask.ask({
+      questions,
+      ...(agent === undefined ? {} : { agent }),
+      ...(signal === undefined ? {} : { signal }),
+    })
+    // Normalize: tolerate providers that omit `selected` on pure-custom answers.
+    return (r.answers ?? []).map((a) => ({ ...a, selected: a.selected ?? [] }))
+  }
+}
+
 interface InvocationAgentShape {
   id?: unknown
   session?: { id?: unknown }
@@ -306,17 +356,170 @@ function answerFor(answers: AskAnswerItemShape[] | undefined, id: string): AskAn
 }
 
 /** Blank item = the UI's "skipped" encoding: keep the current value. */
-function isAnswered(a: AskAnswerItemShape | undefined): a is AskAnswerItemShape {
+export function isAnswered(a: AskAnswerItemShape | undefined): a is AskAnswerItemShape {
   return a !== undefined && !(a.selected.length === 0 && (a.custom === undefined || a.custom.trim() === ''))
 }
 
-const DISTILL_OFF = '暂不开（推荐）'
+/** Custom input wins over a selected option (both may arrive). */
+function pickText(a: AskAnswerItemShape): string {
+  return (a.custom !== undefined && a.custom.trim() !== '' ? a.custom : a.selected[0] ?? '').trim()
+}
+
+const SKIP_LABEL = '暂不启用蒸馏（跳过）'
+const MAX_PANEL_OPTIONS = 10
+const MAX_MODEL_OPTIONS = 8
+
+/** Safe catalog reads: the advisory directory must never break the wizard. */
+function safeProviders(llm: LlmDirectoryShape): { id: string; name: string }[] {
+  try {
+    return [...llm.listProviders()]
+  } catch {
+    return []
+  }
+}
+
+async function safeModels(llm: LlmDirectoryShape, provider: string): Promise<{ id: string; name: string; description?: string }[]> {
+  try {
+    return [...(await llm.listModels(provider))]
+  } catch {
+    return []
+  }
+}
+
+/** Panel P — which provider owns the distill route? Options = live ids (+ skip in the wizard). */
+function distillProviderQuestion(llm: LlmDirectoryShape, current: string, notice: string | undefined, header: string, withSkip: boolean): AskItemShape {
+  const providers = safeProviders(llm)
+  const listed = providers.slice(0, MAX_PANEL_OPTIONS - (withSkip ? 1 : 0))
+  return {
+    id: 'distill-provider',
+    header,
+    question: '后台蒸馏用哪个 provider？',
+    detail: [
+      `当前：${current === '' ? '未启用蒸馏（观察只积累，不自动蒸馏成 Topic）' : current}`,
+      ...(notice === undefined ? [] : [`⚠️ ${notice}`]),
+      ...(providers.length > listed.length ? [`共 ${providers.length} 个已启用 provider（列出前 ${listed.length}），其他选 Other 手输 provider id`] : []),
+    ].join('\n'),
+    options: [
+      ...listed.map((p) => ({ label: p.id, description: p.name })),
+      ...(withSkip ? [{ label: SKIP_LABEL, description: '先不启用蒸馏，随时 /wiki set distill-provider 再开' }] : []),
+    ],
+  }
+}
+
+/** Panel M — which model on that provider? Options = top of the advisory catalog + custom. */
+async function distillModelQuestion(llm: LlmDirectoryShape, provider: string, current: string, header: string, notice?: string): Promise<AskItemShape> {
+  const models = await safeModels(llm, provider)
+  const listed = models.slice(0, MAX_MODEL_OPTIONS)
+  return {
+    id: 'distill-model',
+    header,
+    question: `蒸馏用 ${provider} 的哪个 model？`,
+    detail: [
+      `当前 model：${current === '' ? '未设置' : current}`,
+      ...(notice === undefined ? [] : [`⚠️ ${notice}`]),
+      `该 provider 目录共 ${models.length} 个模型${models.length > listed.length ? `（列出前 ${listed.length}）` : ''}；目录仅供参考，其他选 Other 手输 model id`,
+    ].join('\n'),
+    options: listed.map((m) => ({ label: m.id, description: m.description === undefined ? m.name : `${m.name} — ${m.description}` })),
+  }
+}
+
+const WIZARD_HEADER = 'llmwiki 配置向导（2/4）'
+const SET_HEADER = 'llmwiki distill 配置'
 
 /**
- * The interactive flow: three ask-user panels — mode, then a batched panel
- * (repo when GitHub mode, distill, inject tier, observe), then a confirm
- * panel whose detail lists exactly what will be written. A closed panel or
- * a skipped question never writes.
+ * Two dependent panels — provider first, then that provider's models — so the
+ * model list can come from the chosen provider's catalog. Answers run through
+ * `resolveModelInfo` before entering the pending batch: NO_ADAPTER blocks and
+ * re-asks (bounded), any other rejection (model outside the advisory catalog,
+ * possibly still usable) warns but allows. Returns undefined when the user
+ * skips or blanks the panel (keep current).
+ */
+export async function askDistillRoute(
+  llm: LlmDirectoryShape,
+  panel: (questions: AskItemShape[]) => Promise<AskAnswerItemShape[]>,
+  cfg: { distillProvider: string; distillModel: string },
+  maxAttempts = 3,
+): Promise<{ provider: string; model: string; unknownModel: boolean } | undefined> {
+  let notice: string | undefined
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const pAnswers = await panel([distillProviderQuestion(llm, cfg.distillProvider, notice, WIZARD_HEADER, true)])
+    const pPick = answerFor(pAnswers, 'distill-provider')
+    if (!isAnswered(pPick) || pickText(pPick) === SKIP_LABEL) return undefined
+    const provider = pickText(pPick)
+    const mAnswers = await panel([await distillModelQuestion(llm, provider, cfg.distillModel, WIZARD_HEADER)])
+    const mPick = answerFor(mAnswers, 'distill-model')
+    if (!isAnswered(mPick)) return undefined
+    const model = pickText(mPick)
+    try {
+      await llm.resolveModelInfo(provider, model)
+      return { provider, model, unknownModel: false }
+    } catch (error) {
+      if ((error as { code?: string }).code === 'NO_ADAPTER') {
+        notice = `provider ${provider} 当前没有可用的模型路由，请重新选择`
+        continue
+      }
+      // Non-NO_ADAPTER failure: the catalog is advisory — warn, allow.
+      return { provider, model, unknownModel: true }
+    }
+  }
+  throw new Error(`多次选择仍没有可用的模型路由（${notice ?? 'NO_ADAPTER'}），未写入任何改动；请确认 provider 已启用后重试 /wiki onboard`)
+}
+
+/**
+ * Single-panel variant behind `/wiki set distill-provider|distill-model`:
+ * one question, current value shown, blank answer = keep. Validation mirrors
+ * the wizard (`askDistillRoute`): a provider pick must sit in the live route
+ * table (the NO_ADAPTER equivalent — blocked, bounded re-ask); a model pick
+ * runs through `resolveModelInfo` — NO_ADAPTER blocks, any other failure
+ * warns but allows (model outside the advisory catalog, possibly still
+ * usable). Returns the picked value (plus the warning when a failed check was
+ * allowed through), or undefined on skip/blank.
+ */
+export async function askDistillSingle(
+  llm: LlmDirectoryShape,
+  panel: (questions: AskItemShape[]) => Promise<AskAnswerItemShape[]>,
+  key: 'distill-provider' | 'distill-model',
+  cfg: { distillProvider: string; distillModel: string },
+  maxAttempts = 3,
+): Promise<{ value: string; warning?: string } | undefined> {
+  let notice: string | undefined
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const question = key === 'distill-provider'
+      ? distillProviderQuestion(llm, cfg.distillProvider, notice, SET_HEADER, false)
+      : await distillModelQuestion(llm, cfg.distillProvider, cfg.distillModel, SET_HEADER, notice)
+    const a = answerFor(await panel([question]), question.id)
+    if (!isAnswered(a) || pickText(a) === SKIP_LABEL) return undefined
+    const value = pickText(a)
+    if (key === 'distill-provider') {
+      // Custom ids must still be a live route — the NO_ADAPTER equivalent.
+      if (safeProviders(llm).some((p) => p.id === value)) return { value }
+      notice = `provider ${value} 当前没有可用的模型路由，请重新选择`
+      continue
+    }
+    try {
+      await llm.resolveModelInfo(cfg.distillProvider, value)
+      return { value }
+    } catch (error) {
+      if ((error as { code?: string }).code === 'NO_ADAPTER') {
+        notice = `provider ${cfg.distillProvider} 当前没有可用的模型路由，请重新选择`
+        continue
+      }
+      return {
+        value,
+        warning: `${value} 未通过 ${cfg.distillProvider} 的模型目录校验（模型目录外，可能仍可用），已放行；若实际不可用可再改`,
+      }
+    }
+  }
+  throw new Error('多次选择仍没有可用的模型路由，未写入任何改动；请确认 provider 已启用后重试')
+}
+
+/**
+ * The interactive flow: storage mode, then the distill route as two dependent
+ * panels (provider → that provider's models), then a batched panel (repo when
+ * GitHub mode, inject tier, observe), then a confirm panel whose detail lists
+ * exactly what will be written. A closed panel or a skipped question never
+ * writes. Hosts without the llm directory never enter here (the handler gates
+ * on it and falls back to the typed wizard).
  */
 export async function runInteractiveOnboard(
   service: WikiService,
@@ -325,20 +528,17 @@ export async function runInteractiveOnboard(
   detectLogin: GithubLoginDetector,
   agent: InvocationAgentShape | undefined,
   signal: AbortSignal | undefined,
+  llm: LlmDirectoryShape,
 ): Promise<CommandResult> {
   const ok = (text: string): CommandResult => ({ kind: 'success', text })
   const fail = (text: string): CommandResult => ({ kind: 'error', text })
-  const panel = async (questions: AskItemShape[]): Promise<AskAnswerItemShape[]> => {
-    const r = await ask.ask({ questions, ...(agent === undefined ? {} : { agent }), ...(signal === undefined ? {} : { signal }) })
-    // Normalize: tolerate providers that omit `selected` on pure-custom answers.
-    return (r.answers ?? []).map((a) => ({ ...a, selected: a.selected ?? [] }))
-  }
+  const panel = makePanel(ask, agent, signal)
   try {
     const cfg = service.cfg
     // Stage 1 — storage mode (its own panel: the batch depends on it).
     const modeAnswers = await panel([{
       id: 'mode',
-      header: 'llmwiki 配置向导（1/3）',
+      header: 'llmwiki 配置向导（1/4）',
       question: 'Topic 记忆存在哪里？',
       detail: `当前：${cfg.repo === '' ? 'local-only' : `GitHub 同步（${cfg.repo}）`}`,
       options: [
@@ -350,7 +550,11 @@ export async function runInteractiveOnboard(
     if (!isAnswered(modePick)) return ok('向导结束——未选择存储模式，配置保持原样。')
     const githubMode = (modePick.selected[0] ?? '').includes('GitHub')
 
-    // Stage 2 — the remaining decisions in one batched panel (tabs / pager).
+    // Stage 2 — the distill route: two dependent asks (the model list comes
+    // from the chosen provider's catalog), pre-validated via resolveModelInfo.
+    const route = await askDistillRoute(llm, panel, cfg)
+
+    // Stage 3 — the remaining decisions in one batched panel (tabs / pager).
     const questions: AskItemShape[] = []
     let suggestedRepo: string | undefined
     if (githubMode) {
@@ -358,7 +562,7 @@ export async function runInteractiveOnboard(
       if (login !== undefined) suggestedRepo = `${login}/${DEFAULT_WIKI_REPO}`
       questions.push({
         id: 'repo',
-        header: 'llmwiki 配置向导（2/3）',
+        header: 'llmwiki 配置向导（3/4）',
         question: 'GitHub 仓库（owner/name）？',
         detail: `留空跳过 = 留在 local-only。默认建议 ${suggestedRepo ?? `${DEFAULT_WIKI_REPO}（gh 登录名探测失败，请选 Other 输入完整 owner/name）`}`,
         ...(suggestedRepo === undefined ? {} : { options: [{ label: suggestedRepo, description: '自动探测的 gh 登录名 + 默认仓库名' }] }),
@@ -366,17 +570,10 @@ export async function runInteractiveOnboard(
     }
     questions.push(
       {
-        id: 'distill',
-        header: 'llmwiki 配置向导（2/3）',
-        question: '后台蒸馏模型？',
-        detail: `当前：${cfg.distillProvider !== '' && cfg.distillModel !== '' ? `${cfg.distillProvider} / ${cfg.distillModel}` : '未配置（观察只积累，不自动蒸馏成 Topic）'}。要开的话选 Other 输入 provider model（如 zai-coding-cn glm-4.7-air）或 provider/model。`,
-        options: [{ label: DISTILL_OFF, description: '先用一阵，随时 /wiki set distill-provider 再开' }],
-      },
-      {
         id: 'inject',
-        header: 'llmwiki 配置向导（2/3）',
+        header: 'llmwiki 配置向导（3/4）',
         question: '注入档位？',
-        detail: `当前：topK ${cfg.topK} / 总预算 ${cfg.totalBudget} tok / 阈值 ${cfg.matchThreshold}`,
+        detail: `当前：topK ${cfg.topK} / 总预算 ${cfg.totalBudget} tok / 阈值 ${cfg.matchThreshold}；会话级去重${cfg.injectDedup ? '开（同会话已注入不重注）' : '关'}`,
         options: [
           { label: '保守（topK 2 · 800 tok）', description: '少而准，token 敏感选这个' },
           { label: '标准（topK 4 · 1.5k tok）', description: '默认档（推荐）' },
@@ -385,7 +582,7 @@ export async function runInteractiveOnboard(
       },
       {
         id: 'observe',
-        header: 'llmwiki 配置向导（2/3）',
+        header: 'llmwiki 配置向导（3/4）',
         question: '自动观察？',
         detail: `当前：${cfg.autoObserve ? `开（每轮自动抓原子观察，每侧 ≤${cfg.observationMaxChars} 字）` : '关（只手动 topic_save / topic_observe）'}`,
         options: [
@@ -409,13 +606,9 @@ export async function runInteractiveOnboard(
         pending.repo = parsed as string
       }
     }
-    const distill = answerFor(batchAnswers, 'distill')
-    if (isAnswered(distill) && !(distill.selected[0] ?? '').includes('暂不开')) {
-      const raw = distill.custom !== undefined && distill.custom.trim() !== '' ? distill.custom : distill.selected[0] ?? ''
-      const parsed = parseDistillInput(raw)
-      if ('error' in parsed) return fail(`${parsed.error}\n未写入任何改动；稍后可用 /wiki set distill-provider / distill-model 单独设置。`)
-      pending.distillProvider = parsed.provider
-      pending.distillModel = parsed.model
+    if (route !== undefined) {
+      pending.distillProvider = route.provider
+      pending.distillModel = route.model
     }
     const inject = answerFor(batchAnswers, 'inject')
     if (isAnswered(inject)) {
@@ -428,13 +621,16 @@ export async function runInteractiveOnboard(
     const ops = confirmOps(pending)
     if (ops.length === 0) return ok('向导结束——本次没有选择任何改动，配置保持原样。')
 
-    // Stage 3 — confirm with the exact write set in the detail.
+    // Stage 4 — confirm with the exact write set in the detail.
     const keys = CONFIG_KEYS.filter((k) => k in pending)
     const confirmAnswers = await panel([{
       id: 'confirm',
-      header: 'llmwiki 配置向导（3/3）',
+      header: 'llmwiki 配置向导（4/4）',
       question: `写入这 ${ops.length} 项配置？（下次会话启动后生效）`,
-      detail: keys.map((k) => `- ${displayKey(k)} = ${String(pending[k])}`).join('\n'),
+      detail: [
+        ...keys.map((k) => `- ${displayKey(k)} = ${String(pending[k])}`),
+        ...(route?.unknownModel === true ? [`- ⚠️ ${route.model} 未通过 ${route.provider} 的模型目录校验（模型目录外，可能仍可用）——已放行，若实际不可用可再改`] : []),
+      ].join('\n'),
       options: [
         { label: '写入', description: '批量写入 settings（llmwiki namespace）' },
         { label: '放弃', description: '不写入任何改动' },
@@ -477,16 +673,19 @@ export async function runInteractiveOnboard(
  * wizard state lives in the closure, so tests get a fresh wizard per
  * buildWikiCommand() and concurrent surfaces don't share progress.
  *
- * Primary path is the native ask-user seam when a provider is registered
- * (TUI panel, web composer, feishu card — whichever surface owns the slot,
- * with dsh-ask-router optionally fanning out to all of them). `resolveAsk`
- * returning undefined — bare hosts, no UI — falls back to the typed wizard.
+ * Primary path is the native ask-user seam when BOTH providers are present:
+ * `resolveAsk()` (TUI panel, web composer, feishu card — whichever surface
+ * owns the slot, with dsh-ask-router optionally fanning out) and a usable
+ * `resolveLlm()` candidate (the first with a non-empty live route table,
+ * feeding the distill provider/model panels). Either one missing — bare
+ * hosts, no UI, no model route — falls back to the typed wizard.
  */
 export function createOnboardHandler(
   service: WikiService,
   mutate: MutateFn,
   detectLogin: GithubLoginDetector = detectGithubLogin,
   resolveAsk: AskServiceResolver = () => undefined,
+  resolveLlm: LlmDirectoryResolver = () => [],
 ): (args: string[], invocation: CommandInvocation) => Promise<CommandResult> {
   let state = freshState()
   const ok = (text: string): CommandResult => ({ kind: 'success', text })
@@ -500,15 +699,20 @@ export function createOnboardHandler(
   return async (args, invocation) => {
     const input = args.join(' ').trim()
     if (input === '') {
-      // Bare `/wiki onboard` with a live ask-user provider opens the native
-      // panel flow; explicit args always mean typed-wizard answers.
+      // Bare `/wiki onboard` with a live ask-user provider AND a usable llm
+      // directory (first candidate with a non-empty route table) opens the
+      // native panel flow; explicit args always mean typed-wizard answers.
       const askService = resolveAsk()
-      if (askService !== undefined && typeof askService.ask === 'function') {
+      const pick = pickLlmDirectory(resolveLlm())
+      if (askService !== undefined && typeof askService.ask === 'function' && pick.kind === 'ok') {
         const invocationLike = invocation as { agent?: InvocationAgentShape; signal?: AbortSignal }
-        return runInteractiveOnboard(service, mutate, askService, detectLogin, invocationLike.agent, invocationLike.signal)
+        return runInteractiveOnboard(service, mutate, askService, detectLogin, invocationLike.agent, invocationLike.signal, pick.llm)
       }
       if (state.step === 'done') state = freshState()
-      return ok(renderStep(state, service.cfg))
+      // Typed fallback; when only the model route is missing, say why the
+      // pick panels did not open.
+      const notice = llmDirectoryNotice(pick)
+      return ok(notice === undefined ? renderStep(state, service.cfg) : `${notice}\n${renderStep(state, service.cfg)}`)
     }
     if (QUIT.test(input)) {
       state = freshState()
