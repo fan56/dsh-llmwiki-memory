@@ -2,7 +2,7 @@
 
 Status: accepted
 
-用户可选择持久化模式：**local-only**（默认）——Bundle 只存在于本地 Cache（`~/.dsh/llmwiki/`），本地 git 仓库照常提交，历史可追溯不减配，零配置零凭据；**GitHub 同步**——配置 Remote（默认 `dsh-llmwiki-memory`，可自定义 owner/name）后启用，写穿 + 去抖推送按 ADR 0003 执行。
+用户可选择持久化模式：**local-only**（默认）——Bundle 只存在于本地 Cache（`~/.dsh/llmwiki/`），本地 git 仓库照常提交，历史可追溯不减配，零配置零凭据；**GitHub 同步**——配置 Remote（默认 `dsh-wiki-memory`，可自定义 owner/name；避开插件源码仓同名，见 ADR 0009）后启用，写穿 + 去抖推送按 ADR 0003 执行。
 
 ## Considered Options
 

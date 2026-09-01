@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Remote 是一个专用 GitHub 私有仓库，仓库内容即一个完整 Bundle，所有机器都在单一 `main` 分支上推拉。数据仓库默认名 `dsh-llmwiki-memory`（owner 取当前账号），插件支持用户自定义任意 owner/name。
+Remote 是一个专用 GitHub 私有仓库，仓库内容即一个完整 Bundle，所有机器都在单一 `main` 分支上推拉。数据仓库默认名 `dsh-wiki-memory`（owner 取当前账号；刻意避开插件源码仓同名 `dsh-llmwiki-memory`，见 ADR 0009），插件支持用户自定义任意 owner/name。
 
 认证继承 dsh-vault 先例：token 解析 `GITHUB_TOKEN` 环境变量 → `gh auth token`，GitHub 登录不是插件的职责；git 推拉时 token 走每命令 header 注入，不落盘、不进 remote URL。
 
