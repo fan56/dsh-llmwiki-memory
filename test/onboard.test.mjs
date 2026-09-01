@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { BundleStore } from '../lib/store.js'
 import { WikiService } from '../lib/service.js'
 import { buildWikiCommand, HELP } from '../lib/commands.js'
-import { applyAnswer, confirmOps, freshState, renderStep } from '../lib/onboard.js'
+import { applyAnswer, confirmOps, createOnboardHandler, freshState, renderStep } from '../lib/onboard.js'
 
 function makeService(cfgOverrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'llmwiki-onboard-'))
@@ -29,6 +29,26 @@ function makeService(cfgOverrides = {}) {
 }
 
 const inv = (rawInput) => ({ rawInput, signal: undefined })
+
+const invAgent = (rawInput, agent) => ({ rawInput, signal: undefined, agent })
+
+/** Scripted ask-user provider: pops one answer batch per ask() call. */
+function fakeAsk(script) {
+  const calls = []
+  return {
+    calls,
+    ask: async (req) => {
+      calls.push(req)
+      const next = script.shift()
+      if (next === undefined) {
+        const err = new Error('panel closed')
+        err.code = 'ASK_CANCELLED'
+        throw err
+      }
+      return { answers: next }
+    },
+  }
+}
 
 /** Drive the wizard through a full answer sequence, returning all results. */
 async function run(cmd, answers) {
@@ -90,7 +110,6 @@ test('onboard: github path adds repo step; bad repo errors and stays', async () 
 test('onboard: repo auto-detect uses injected detector; failure keeps the step', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const { createOnboardHandler } = await import('../lib/onboard.js')
     const detectOk = createOnboardHandler(service, mutate, async () => 'someuser')
     await detectOk(['b'], inv(''))
     const picked = await detectOk(['a'], inv(''))
@@ -253,4 +272,150 @@ test('onboard: pure core — applyAnswer/confirmOps/renderStep agree', () => {
   const bad = applyAnswer(freshState(), 'maybe', cfg)
   assert.notEqual(bad.error, undefined)
   assert.equal(bad.state.step, 'mode')
+})
+
+// ---- Interactive path (native ask-user panels) ----
+
+test('onboard interactive: local-only happy path asks 3 panels and writes the batch', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const ask = fakeAsk([
+      [{ id: 'mode', selected: ['local-only'] }],
+      [{ id: 'distill', selected: [] }, { id: 'inject', selected: ['标准（topK 4 · 1.5k tok）'] }, { id: 'observe', selected: [] }],
+      [{ id: 'confirm', selected: ['写入'] }],
+    ])
+    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const r = await cmd.handler(inv('onboard'))
+    assert.equal(r.kind, 'success')
+    assert.match(r.text, /已写入 llmwiki 配置（2 项）/)
+    assert.equal(ask.calls.length, 3)
+    assert.equal(ask.calls[0].questions.length, 1)
+    assert.equal(ask.calls[0].questions[0].id, 'mode')
+    assert.equal(ask.calls[0].questions[0].options.length, 2)
+    // Local-only path: no repo question in the batch.
+    assert.deepEqual(ask.calls[1].questions.map((q) => q.id), ['distill', 'inject', 'observe'])
+    assert.equal(ask.calls[2].questions[0].id, 'confirm')
+    assert.match(ask.calls[2].questions[0].detail, /top-k = 4/)
+    assert.equal(mutations.length, 1)
+    assert.deepEqual(mutations[0], ['topK=4', 'totalBudget=1500'])
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: github mode adds repo panel, custom answers win, agent is passed through', async () => {
+  const { service, mutations, mutate, cleanup, getCfg } = makeService()
+  try {
+    const ask = fakeAsk([
+      [{ id: 'mode', selected: ['GitHub 同步'] }],
+      [{ id: 'repo', custom: 'me/mine' }, { id: 'distill', custom: 'prov m1' }, { id: 'inject', selected: [] }, { id: 'observe', selected: ['关闭'] }],
+      [{ id: 'confirm', selected: ['写入'] }],
+    ])
+    const handler = createOnboardHandler(service, mutate, async () => 'someuser', () => ask)
+    const agent = { id: 'sess-1', session: { id: 'sess-1' } }
+    const r = await handler([], invAgent('onboard', agent))
+    assert.equal(r.kind, 'success')
+    assert.match(r.text, /已写入 llmwiki 配置（4 项）/)
+    // The repo suggestion was computed from the injected login detector.
+    const batch = ask.calls[1].questions
+    const repoQ = batch.find((q) => q.id === 'repo')
+    assert.equal(repoQ.options[0].label, 'someuser/dsh-wiki-memory')
+    // The invocation's agent rides on every ask so session-owned surfaces can route it.
+    assert.equal(ask.calls[0].agent, agent)
+    assert.deepEqual(mutations[0], ['repo=me/mine', 'autoObserve=false', 'distillProvider=prov', 'distillModel=m1'])
+    assert.equal(getCfg().autoObserve, false)
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: closed panel cancels with zero writes', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const ask = fakeAsk([[{ id: 'mode', selected: ['local-only'] }]])
+    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const r = await cmd.handler(inv('onboard'))
+    assert.equal(r.kind, 'success')
+    assert.match(r.text, /已取消配置向导，未写入任何改动/)
+    assert.equal(mutations.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: skipping the mode question ends the wizard', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const ask = fakeAsk([[{ id: 'mode', selected: [] }]])
+    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const r = await cmd.handler(inv('onboard'))
+    assert.match(r.text, /未选择存储模式/)
+    assert.equal(ask.calls.length, 1)
+    assert.equal(mutations.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: confirm-放弃 writes nothing', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const ask = fakeAsk([
+      [{ id: 'mode', selected: ['local-only'] }],
+      [{ id: 'inject', selected: ['保守（topK 2 · 800 tok）'] }],
+      [{ id: 'confirm', selected: ['放弃'] }],
+    ])
+    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const r = await cmd.handler(inv('onboard'))
+    assert.match(r.text, /已放弃/)
+    assert.equal(mutations.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: invalid custom repo errors without writing', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const ask = fakeAsk([
+      [{ id: 'mode', selected: ['GitHub 同步'] }],
+      [{ id: 'repo', custom: 'no-slash' }],
+    ])
+    const handler = createOnboardHandler(service, mutate, async () => 'someuser', () => ask)
+    const r = await handler([], inv('onboard'))
+    assert.equal(r.kind, 'error')
+    assert.match(r.text, /owner\/name/)
+    assert.match(r.text, /未写入任何改动/)
+    assert.equal(mutations.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard interactive: every-batch-answer-skipped skips the confirm panel entirely', async () => {
+  const { service, mutations, mutate, cleanup } = makeService()
+  try {
+    const ask = fakeAsk([
+      [{ id: 'mode', selected: ['local-only'] }],
+      [{ id: 'distill', selected: ['暂不开（推荐）'] }, { id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
+    ])
+    const cmd = buildWikiCommand(service, mutate, () => ask)
+    const r = await cmd.handler(inv('onboard'))
+    assert.match(r.text, /没有选择任何改动/)
+    assert.equal(ask.calls.length, 2, 'no confirm panel when nothing is pending')
+    assert.equal(mutations.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('onboard: without an ask provider the bare command falls back to the typed wizard', async () => {
+  const { service, mutate, cleanup } = makeService()
+  try {
+    const cmd = buildWikiCommand(service, mutate, () => undefined)
+    const r = await cmd.handler(inv('onboard'))
+    assert.match(r.text, /配置向导（1\/4）/)
+  } finally {
+    cleanup()
+  }
 })

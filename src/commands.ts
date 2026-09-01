@@ -15,11 +15,11 @@ import { serializeTopicDoc, slugify, firstParagraph } from './okf.ts'
 import { buildGraph, renderGraphHtml } from './viz.ts'
 import { CONFIG_KEYS, displayKey, type ConfigKey, type LlmwikiConfigValue, parseConfigValue } from './config.ts'
 import { aggregateStats } from './ilog.ts'
-import { createOnboardHandler, type MutateFn } from './onboard.ts'
+import { createOnboardHandler, type AskServiceResolver, type MutateFn } from './onboard.ts'
 
 export const HELP = [
   'dsh-llmwiki-memory — OKF topic 记忆（本地 bundle，git 可追溯，可选 GitHub 同步）',
-  '  /wiki onboard             a/b/c 分步配置向导（模式 / 仓库 / 蒸馏 / 注入 / 观察）',
+  '  /wiki onboard             交互式配置向导（ask-user 面板逐项问答；无 UI 环境逐条输入）',
   '  /wiki status              bundle 健康：topic 数、观察积压、冲突、同步状态',
   '  /wiki stats               注入统计：hit rate、top-N、near-miss 分布与调参建议',
   '  /wiki list                列出全部 Topic',
@@ -33,8 +33,8 @@ export const HELP = [
   '凭据：$GITHUB_TOKEN 或已登录的 gh CLI；登录不在本插件职责内。',
 ].join('\n')
 
-export function buildWikiCommand(service: WikiService, mutate: MutateFn): CommandDefinition {
-  const onboard = createOnboardHandler(service, mutate)
+export function buildWikiCommand(service: WikiService, mutate: MutateFn, resolveAsk: AskServiceResolver = () => undefined): CommandDefinition {
+  const onboard = createOnboardHandler(service, mutate, undefined, resolveAsk)
   return {
     name: 'wiki',
     description: 'OKF topic 记忆：onboard | status | stats | list | show | history | graph | sync | config | set',

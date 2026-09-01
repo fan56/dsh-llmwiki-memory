@@ -27,7 +27,7 @@
 
 | 命令 | 用途 |
 |---|---|
-| `/wiki onboard` | a/b/c 分步配置向导：模式 / 仓库 / 蒸馏 / 注入 / 观察，一问一答，末步确认才写入 |
+| `/wiki onboard` | 交互式配置向导：唤起 dsh 原生 ask-user 面板逐项问答（模式 / 仓库 / 蒸馏 / 注入档位 / 自动观察），末步确认才写入；无 ask-user UI 的环境自动退化为逐条输入 |
 | `/wiki status` | bundle 健康：topic 数、观察积压、冲突、同步状态 |
 | `/wiki stats` | 注入统计：hit rate、top-N、near-miss 分布与调参建议 |
 | `/wiki list` / `show` / `history` | 浏览 Topic、反向引用与变更史 |
@@ -41,7 +41,7 @@
 dsh plugin --profile <你的profile> add @aiwayds/dsh-llmwiki-memory
 ```
 
-Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好后的第一件事：跑 `/wiki onboard`，按 a/b/c 走完五步即可配好常用项。GitHub 同步：`/wiki set repo <owner/name>`（建议仓库名 `dsh-wiki-memory`，与插件源码仓区分开），凭据走 `$GITHUB_TOKEN` 或已登录的 gh CLI（登录不是本插件职责）。
+Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好后的第一件事：跑 `/wiki onboard`——直接弹出 dsh 原生 ask-user 交互面板逐项问答（TUI 面板 / 浏览器会话 / 飞书卡自动适配，feishu 侧装了 dsh-ask-router 还能双端竞答）。GitHub 同步：`/wiki set repo <owner/name>`（建议仓库名 `dsh-wiki-memory`，与插件源码仓区分开），凭据走 `$GITHUB_TOKEN` 或已登录的 gh CLI（登录不是本插件职责）。
 
 ## Acknowledgements
 

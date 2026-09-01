@@ -26,6 +26,7 @@ import { buildWikiCommand } from './commands.ts'
 import { Observer, textOf, type UserMessageLike } from './observer.ts'
 import { Distiller, defaultModelCaller } from './distill.ts'
 import { LlmwikiConfig, type LlmwikiConfigValue } from './config.ts'
+import type { AskServiceResolver, AskServiceShape } from './onboard.ts'
 
 export const name = 'dsh-llmwiki-memory'
 
@@ -245,7 +246,20 @@ export function apply(ctx: Context): void {
       if (settingsMutator?.mutate === undefined) throw new Error('settings 服务不可用，无法写入配置')
       await settingsMutator.mutate(ns, ops)
     }
-    cmdCtx.effect(() => commands.register(buildWikiCommand(service, mutate as never)), 'llmwiki: /wiki')
+    // Resolved lazily at invocation time: whichever UI registered the ask-user
+    // provider (TUI panel / web composer / feishu card, ask-router optional)
+    // renders /wiki onboard's panels; a host without one falls back to typed input.
+    const resolveAsk: AskServiceResolver = () => {
+      try {
+        const value = typeof (ctx as { get?: (k: string) => unknown }).get === 'function'
+          ? (ctx as { get: (k: string) => unknown }).get('userQuestions')
+          : undefined
+        return value as AskServiceShape | undefined
+      } catch {
+        return undefined
+      }
+    }
+    cmdCtx.effect(() => commands.register(buildWikiCommand(service, mutate as never, resolveAsk)), 'llmwiki: /wiki')
   })
 }
 

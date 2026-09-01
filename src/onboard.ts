@@ -244,15 +244,248 @@ export function detectGithubLogin(timeoutMs = 5000): Promise<string | undefined>
 
 const QUIT = /^(q|quit|exit|退出)$/i
 
+// ---- Interactive path: the native ask-user seam (ctx.userQuestions) --------
+// Structural views only — this plugin depends on the wire shape of the seam,
+// never on any UI (tui-pi, web, feishu) or on dsh-ask-router. Whatever surface
+// registered the provider renders the questions natively; the typed wizard
+// above remains the fallback for hosts without a provider.
+
+export interface AskOptionShape {
+  label: string
+  description?: string
+}
+
+export interface AskItemShape {
+  id: string
+  question: string
+  detail?: string
+  header?: string
+  options?: AskOptionShape[]
+}
+
+export interface AskAnswerItemShape {
+  id: string
+  selected: string[]
+  custom?: string
+}
+
+export interface AskServiceShape {
+  ask(request: { questions: AskItemShape[]; agent?: unknown; signal?: AbortSignal }): Promise<{ answers: AskAnswerItemShape[] }>
+}
+
+export type AskServiceResolver = () => AskServiceShape | undefined
+
+interface InvocationAgentShape {
+  id?: unknown
+  session?: { id?: unknown }
+}
+
+/** provider model（空格）或 provider/model（斜杠）；model 本身可含斜杠。 */
+export function parseDistillInput(raw: string): { provider: string; model: string } | { error: string } {
+  let provider: string
+  let model: string
+  if (/\s/.test(raw.trim())) {
+    const split = raw.trim().split(/\s+/)
+    provider = split[0] ?? ''
+    model = split.slice(1).join(' ')
+  } else {
+    const slash = raw.indexOf('/')
+    provider = slash === -1 ? raw : raw.slice(0, slash)
+    model = slash === -1 ? '' : raw.slice(slash + 1)
+  }
+  provider = provider.trim()
+  model = model.trim()
+  if (provider === '' || model === '' || /\s/.test(provider) || /\s/.test(model)) {
+    return { error: '蒸馏模型格式：provider model（空格分隔）或 provider/model（斜杠分隔），如 zai-coding-cn glm-4.7-air' }
+  }
+  return { provider, model }
+}
+
+function answerFor(answers: AskAnswerItemShape[] | undefined, id: string): AskAnswerItemShape | undefined {
+  return answers?.find((a) => a.id === id)
+}
+
+/** Blank item = the UI's "skipped" encoding: keep the current value. */
+function isAnswered(a: AskAnswerItemShape | undefined): a is AskAnswerItemShape {
+  return a !== undefined && !(a.selected.length === 0 && (a.custom === undefined || a.custom.trim() === ''))
+}
+
+const DISTILL_OFF = '暂不开（推荐）'
+
+/**
+ * The interactive flow: three ask-user panels — mode, then a batched panel
+ * (repo when GitHub mode, distill, inject tier, observe), then a confirm
+ * panel whose detail lists exactly what will be written. A closed panel or
+ * a skipped question never writes.
+ */
+export async function runInteractiveOnboard(
+  service: WikiService,
+  mutate: MutateFn,
+  ask: AskServiceShape,
+  detectLogin: GithubLoginDetector,
+  agent: InvocationAgentShape | undefined,
+): Promise<CommandResult> {
+  const ok = (text: string): CommandResult => ({ kind: 'success', text })
+  const fail = (text: string): CommandResult => ({ kind: 'error', text })
+  const panel = async (questions: AskItemShape[]): Promise<AskAnswerItemShape[]> => {
+    const r = await ask.ask({ questions, ...(agent === undefined ? {} : { agent }) })
+    // Normalize: tolerate providers that omit `selected` on pure-custom answers.
+    return (r.answers ?? []).map((a) => ({ ...a, selected: a.selected ?? [] }))
+  }
+  try {
+    const cfg = service.cfg
+    // Stage 1 — storage mode (its own panel: the batch depends on it).
+    const modeAnswers = await panel([{
+      id: 'mode',
+      header: 'llmwiki 配置向导（1/3）',
+      question: 'Topic 记忆存在哪里？',
+      detail: `当前：${cfg.repo === '' ? 'local-only' : `GitHub 同步（${cfg.repo}）`}`,
+      options: [
+        { label: 'local-only', description: '零配置零凭据，数据只在本地 bundle（推荐）' },
+        { label: 'GitHub 同步', description: '指定私有仓，写穿 + 去抖推送，跨机共享' },
+      ],
+    }])
+    const modePick = answerFor(modeAnswers, 'mode')
+    if (!isAnswered(modePick)) return ok('向导结束——未选择存储模式，配置保持原样。')
+    const githubMode = (modePick.selected[0] ?? '').includes('GitHub')
+
+    // Stage 2 — the remaining decisions in one batched panel (tabs / pager).
+    const questions: AskItemShape[] = []
+    let suggestedRepo: string | undefined
+    if (githubMode) {
+      const login = await detectLogin()
+      if (login !== undefined) suggestedRepo = `${login}/${DEFAULT_WIKI_REPO}`
+      questions.push({
+        id: 'repo',
+        header: 'llmwiki 配置向导（2/3）',
+        question: 'GitHub 仓库（owner/name）？',
+        detail: `留空跳过 = 留在 local-only。默认建议 ${suggestedRepo ?? `${DEFAULT_WIKI_REPO}（gh 登录名探测失败，请选 Other 输入完整 owner/name）`}`,
+        ...(suggestedRepo === undefined ? {} : { options: [{ label: suggestedRepo, description: '自动探测的 gh 登录名 + 默认仓库名' }] }),
+      })
+    }
+    questions.push(
+      {
+        id: 'distill',
+        header: 'llmwiki 配置向导（2/3）',
+        question: '后台蒸馏模型？',
+        detail: `当前：${cfg.distillProvider !== '' && cfg.distillModel !== '' ? `${cfg.distillProvider} / ${cfg.distillModel}` : '未配置（观察只积累，不自动蒸馏成 Topic）'}。要开的话选 Other 输入 provider model（如 zai-coding-cn glm-4.7-air）或 provider/model。`,
+        options: [{ label: DISTILL_OFF, description: '先用一阵，随时 /wiki set distill-provider 再开' }],
+      },
+      {
+        id: 'inject',
+        header: 'llmwiki 配置向导（2/3）',
+        question: '注入档位？',
+        detail: `当前：topK ${cfg.topK} / 总预算 ${cfg.totalBudget} tok / 阈值 ${cfg.matchThreshold}`,
+        options: [
+          { label: '保守（topK 2 · 800 tok）', description: '少而准，token 敏感选这个' },
+          { label: '标准（topK 4 · 1.5k tok）', description: '默认档（推荐）' },
+          { label: '放量（topK 6 · 2.5k tok）', description: '记忆多、上下文宽裕' },
+        ],
+      },
+      {
+        id: 'observe',
+        header: 'llmwiki 配置向导（2/3）',
+        question: '自动观察？',
+        detail: `当前：${cfg.autoObserve ? `开（每轮自动抓原子观察，每侧 ≤${cfg.observationMaxChars} 字）` : '关（只手动 topic_save / topic_observe）'}`,
+        options: [
+          { label: '保持开（推荐）', description: '随手聊就被记录，后台蒸馏成 Topic' },
+          { label: '关闭', description: '只在你明确调用工具时记录' },
+        ],
+      },
+    )
+    const batchAnswers = await panel(questions)
+
+    // Collect into the same pending batch the typed wizard confirms with.
+    const pending: Partial<LlmwikiConfigValue> = {}
+    if (githubMode) {
+      const a = answerFor(batchAnswers, 'repo')
+      if (isAnswered(a)) {
+        const raw = (a.custom !== undefined && a.custom.trim() !== '' ? a.custom : a.selected[0] ?? '').trim()
+        const parsed = parseConfigValue('repo', raw)
+        if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) {
+          return fail(`${parsed.error}\n未写入任何改动；稍后可用 /wiki set repo <owner/name> 单独设置。`)
+        }
+        pending.repo = parsed as string
+      }
+    }
+    const distill = answerFor(batchAnswers, 'distill')
+    if (isAnswered(distill) && !(distill.selected[0] ?? '').includes('暂不开')) {
+      const raw = distill.custom !== undefined && distill.custom.trim() !== '' ? distill.custom : distill.selected[0] ?? ''
+      const parsed = parseDistillInput(raw)
+      if ('error' in parsed) return fail(`${parsed.error}\n未写入任何改动；稍后可用 /wiki set distill-provider / distill-model 单独设置。`)
+      pending.distillProvider = parsed.provider
+      pending.distillModel = parsed.model
+    }
+    const inject = answerFor(batchAnswers, 'inject')
+    if (isAnswered(inject)) {
+      const label = inject.selected[0] ?? ''
+      if (label.includes('保守')) { pending.topK = 2; pending.totalBudget = 800 } else if (label.includes('放量')) { pending.topK = 6; pending.totalBudget = 2500 } else { pending.topK = 4; pending.totalBudget = 1500 }
+    }
+    const observe = answerFor(batchAnswers, 'observe')
+    if (isAnswered(observe)) pending.autoObserve = (observe.selected[0] ?? '').includes('关闭') ? false : true
+
+    const ops = confirmOps(pending)
+    if (ops.length === 0) return ok('向导结束——本次没有选择任何改动，配置保持原样。')
+
+    // Stage 3 — confirm with the exact write set in the detail.
+    const keys = CONFIG_KEYS.filter((k) => k in pending)
+    const confirmAnswers = await panel([{
+      id: 'confirm',
+      header: 'llmwiki 配置向导（3/3）',
+      question: `写入这 ${ops.length} 项配置？（下次会话启动后生效）`,
+      detail: keys.map((k) => `- ${displayKey(k)} = ${String(pending[k])}`).join('\n'),
+      options: [
+        { label: '写入', description: '批量写入 settings（llmwiki namespace）' },
+        { label: '放弃', description: '不写入任何改动' },
+      ],
+    }])
+    const confirmPick = answerFor(confirmAnswers, 'confirm')
+    if (!isAnswered(confirmPick) || (confirmPick.selected[0] ?? '').includes('放弃')) {
+      return ok('已放弃，未写入任何改动。随时 /wiki onboard 重新开始。')
+    }
+    try {
+      await mutate(ops)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return fail(`写入 settings 失败：${message}`)
+    }
+    if (pending.repo !== undefined || pending.autoInject !== undefined) service.invalidate()
+    return ok(
+      [
+        `✅ 已写入 llmwiki 配置（${ops.length} 项）：`,
+        ...keys.map((k) => `  ${displayKey(k)} = ${String(pending[k])}`),
+        '下次会话启动后生效。',
+        '之后：/wiki status 看健康；/wiki stats 看注入命中；会话里说「记住…」就会沉淀 Topic。',
+      ].join('\n'),
+    )
+  } catch (error) {
+    const code = (error as { code?: string }).code
+    if (code === 'ASK_CANCELLED' || code === 'ASK_ABORTED') {
+      return ok('已取消配置向导，未写入任何改动。随时 /wiki onboard 重新开始。')
+    }
+    if (code === 'ASK_MISSING_AGENT') {
+      return fail('当前 surface 的 ask-user 需要会话上下文，无法从命令发起。请改用 /wiki set，或在 TUI / 浏览器会话里重跑 /wiki onboard。')
+    }
+    const message = error instanceof Error ? error.message : String(error)
+    return fail(`配置向导中断：${message}\n未写入任何改动。`)
+  }
+}
+
 /**
  * The `/wiki onboard <args>` handler. One instance per command registration —
  * wizard state lives in the closure, so tests get a fresh wizard per
  * buildWikiCommand() and concurrent surfaces don't share progress.
+ *
+ * Primary path is the native ask-user seam when a provider is registered
+ * (TUI panel, web composer, feishu card — whichever surface owns the slot,
+ * with dsh-ask-router optionally fanning out to all of them). `resolveAsk`
+ * returning undefined — bare hosts, no UI — falls back to the typed wizard.
  */
 export function createOnboardHandler(
   service: WikiService,
   mutate: MutateFn,
   detectLogin: GithubLoginDetector = detectGithubLogin,
+  resolveAsk: AskServiceResolver = () => undefined,
 ): (args: string[], invocation: CommandInvocation) => Promise<CommandResult> {
   let state = freshState()
   const ok = (text: string): CommandResult => ({ kind: 'success', text })
@@ -263,9 +496,16 @@ export function createOnboardHandler(
     state = r.state
     return ok(renderStep(state, service.cfg))
   }
-  return async (args, _invocation) => {
+  return async (args, invocation) => {
     const input = args.join(' ').trim()
     if (input === '') {
+      // Bare `/wiki onboard` with a live ask-user provider opens the native
+      // panel flow; explicit args always mean typed-wizard answers.
+      const askService = resolveAsk()
+      if (askService !== undefined && typeof askService.ask === 'function') {
+        const agent = (invocation as { agent?: InvocationAgentShape }).agent
+        return runInteractiveOnboard(service, mutate, askService, detectLogin, agent)
+      }
       if (state.step === 'done') state = freshState()
       return ok(renderStep(state, service.cfg))
     }
