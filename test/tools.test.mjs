@@ -123,6 +123,9 @@ test('retrieveSync: same-turn hot path is synchronous and logs fire-and-forget',
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
   assert.equal(records.length, 2)
-  assert.equal(records[0].injected, true)
-  assert.equal(records[1].injected, false)
+  // The two records are independent fire-and-forget appends: the writes race
+  // on the fs threadpool and their ARRIVAL order is not guaranteed (probe:
+  // ~40% inverted on an idle M-series). Assert the set, not the sequence —
+  // exactly one hit round (injected) and one miss round (not).
+  assert.deepEqual(records.map((r) => r.injected).sort(), [false, true])
 })
