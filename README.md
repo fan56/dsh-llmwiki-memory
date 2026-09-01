@@ -43,6 +43,34 @@ dsh plugin --profile <你的profile> add @aiwayds/dsh-llmwiki-memory
 
 Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好后的第一件事：跑 `/wiki onboard`——直接弹出 dsh 原生 ask-user 交互面板逐项问答（TUI 面板 / 浏览器会话 / 飞书卡自动适配，feishu 侧装了 dsh-ask-router 还能双端竞答）。GitHub 同步：`/wiki set repo <owner/name>`（建议仓库名 `dsh-wiki-memory`，与插件源码仓区分开），凭据走 `$GITHUB_TOKEN` 或已登录的 gh CLI（登录不是本插件职责）。
 
+## 快速上手
+
+1. 安装（上方命令），重启 dsh；
+2. 跑 `/wiki onboard`，在 ask-user 面板里走完 模式 / 仓库 / 蒸馏模型 / 注入档位 / 自动观察 五个决定——末步确认才写入；
+3. 正常干活：相关结论每轮自动注入；说「记住…」让模型 `topic_save`；`/wiki status` 看健康，`/wiki stats` 看注入命中。
+
+## 配置
+
+首次配置交给 `/wiki onboard`；日常微调用 `/wiki set <key> <value>`（写 `settings.yaml` 的 `llmwiki` namespace，下次会话启动生效）。全部键与默认值：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `repo` | 空（local-only） | GitHub 同步仓 `owner/name`；建议 `dsh-wiki-memory`；置空回 local-only |
+| `autoInject` | `true` | 每轮注入总开关 |
+| `topK` | `4` | 每轮最多注入的 Topic 数 |
+| `perTopicBudget` | `300` | 单 Topic 摘要 token 预算 |
+| `totalBudget` | `1500` | 每轮注入总预算 |
+| `matchThreshold` | `0.3` | 命中阈值；按 `/wiki stats` 的 near-miss 证据调 |
+| `tagBoost` | `0.15` | tag 命中加成 |
+| `graphDepth` | `2` | `depends` 图双向游走深度（0 关闭） |
+| `recencyWindowDays` | `7` | 近因加分窗口（+0.2） |
+| `autoObserve` | `true` | 每轮自动抓原子观察 |
+| `observationMaxChars` | `2000` | 每侧每轮观察截断长度 |
+| `distillProvider` / `distillModel` | 空（蒸馏关闭） | 蒸馏 lane 模型路由，两者都设置才启用 |
+| `distillEveryTurns` | `20` | 长 session 每 N 轮触发一次蒸馏 |
+| `distillOnSessionEnd` | `true` | session 结束时蒸馏一次 |
+| `pushDebounceSeconds` | `45` | GitHub 模式去抖推送间隔 |
+
 ## Acknowledgements
 
 本项目的形态直接受以下项目的启发与支撑：
