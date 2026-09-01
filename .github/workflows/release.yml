@@ -47,6 +47,9 @@ jobs:
       - name: Test (unit suite)
         run: npm test
 
+      - name: Install pnpm (the scratch-profile install step drives pnpm)
+        run: npm install -g pnpm --no-audit --no-fund
+
       - name: Boot smoke (real dsh host, scratch profile)
         run: node scripts/smoke-boot.mjs
 

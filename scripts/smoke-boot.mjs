@@ -62,7 +62,7 @@ writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
 }, null, 2) + '\n')
 
 const install = spawnSync('pnpm', ['install'], { cwd: profile, encoding: 'utf8' })
-if (install.status !== 0 || install.error) fail('pnpm install in the scratch profile failed', `${install.stdout}\n${install.stderr}`)
+if (install.status !== 0 || install.error) fail('pnpm install in the scratch profile failed', `${install.error?.message ?? ""}\n${install.stdout}\n${install.stderr}`)
 
 const dshEnv = { ...process.env, DSH_HOME: home }
 
