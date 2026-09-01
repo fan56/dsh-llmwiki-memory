@@ -1,7 +1,7 @@
 {
   "name": "@aiwayds/dsh-llmwiki-memory",
   "version": "0.2.1",
-  "description": "dsh plugin: OKF v0.2 topic memory — local-first git-tracked bundle, hot-path LLM-free injection, two-stage observer with background distill",
+  "description": "dsh-plugin: OKF v0.2 topic memory for dsh - local-first git-tracked bundle, hot-path LLM-free injection, two-stage observer with background distill",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

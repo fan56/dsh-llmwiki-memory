@@ -1,97 +1,99 @@
 # dsh-llmwiki-memory
 
-一个 dsh 插件：把「工作 topic 记忆」维护成 [OKF 标准（Open Knowledge Format v0.2）](https://github.com/GoogleCloudPlatform/open-knowledge-format)的知识 bundle，持久化在本地 git 仓库（可选同步到 GitHub 私有仓库），利用 git 历史提供结论可追溯性，自动观察会话沉淀知识，并在每轮对话前向模型注入相关 Topic。
+English | [中文](README.zh.md)
 
-## 它解决什么问题
+A dsh plugin: maintains "working topic memory" as an [OKF (Open Knowledge Format v0.2)](https://github.com/GoogleCloudPlatform/open-knowledge-format) knowledge bundle, persisted in a local git repository (optionally synced to a private GitHub repo), with conclusions traceable through git history, sessions automatically observed and distilled into knowledge, and relevant topics injected to the model before every turn.
 
-长会话会失忆，跨会话更会。本插件维护一份**结构化的 topic 记忆**：每个 Topic 记录一件事的**名字、依赖、未决问题、目前结论、影响、建议**。结论变了就改文件、打 commit——`git log` 直接回答「这个结论什么时候、被谁、为什么改的」。
+## The problem it solves
 
-## 核心特性
+Long sessions forget. Cross-session, even more so. This plugin maintains **structured topic memory**: each Topic records a matter's **name, dependencies, open questions, current conclusion, impact, and recommendations**. When a conclusion changes, edit the file and commit — `git log` directly answers "when, by whom, and why did this conclusion change".
 
-- **OKF v0.2 严格合规**：每个 Topic 是 `markdown + YAML frontmatter` 的 concept 文档（`type: Topic`），可被 Obsidian、OKF 校验器等整个生态直接消费；自带 provenance（`sources`）、trust（`generated`/`verified`）、lifecycle（`status`/`stale_after`）三族字段。
-- **git 可追溯**：一次结论变更 = 一个 commit（写穿）；`topic_history` 工具和 `/wiki history` 把变更史工具化。
-- **local-first**：默认 local-only 模式（`~/.dsh/llmwiki/`），零配置零凭据；配置 `repo` 后启用 GitHub 同步（单库单 Bundle 单 main，写穿 + 去抖推送，rebase 冲突标记降权等人解，不做自动智能合并）。
-- **免 LLM 热路径注入**：每轮输入做词法匹配（CJK bigram + 词 + tag 加权 + `depends` 图游走），毫秒级；无命中零注入；per-topic 摘要 ≤300 token、top-K ≤4、总预算 ≤1.5k token，全部可配。
-- **注入可观测可调参**：每轮落 Injection Log（命中、得分、near-miss、预算占用），`/wiki stats` 给出 hit rate、top-N、near-miss 分布和阈值调参建议——调参看证据，不拍脑袋。
-- **知识连接成图**：`depends`（机器可读的有向依赖边）+ 正文 `[[wikilink]]` 与 markdown 链接（人写边）共同构成图；检索命中后沿图双向游走（每层衰减一半、深度可配），一次命中带入一个知识子图；每次写入自动重建 `meta/backlinks.json` 反向引用索引，`/wiki show` 直接列出「谁引用了我、怎么引用的」——改一条结论前先看牵连面。
-- **两段式观察（M2）**：主模型用 `topic_observe` 随手记原子观察，后台蒸馏 lane（session end + 每 N 轮，模型可配）把观察批量蒸馏成正式 Topic；主模型认为值得记时直接 `topic_save`。
+## Core features
 
-## 工具与命令
+- **Strict OKF v0.2 compliance**: each Topic is a `markdown + YAML frontmatter` concept document (`type: Topic`) that the whole OKF ecosystem (Obsidian, OKF validators) can consume directly; ships with the provenance (`sources`), trust (`generated`/`verified`), and lifecycle (`status`/`stale_after`) field families.
+- **Git-traceable**: one conclusion change = one commit (write-through); the `topic_history` tool and `/wiki history` make change history first-class.
+- **Local-first**: local-only mode by default (`~/.dsh/llmwiki/`), zero config, zero credentials; setting `repo` enables GitHub sync (single repo, single bundle, single `main`, write-through + debounced push; rebase conflicts are demoted and flagged for a human — no automatic smart-merge).
+- **LLM-free hot-path injection**: per-turn lexical matching (CJK bigrams + words + weighted tags + `depends` graph walk), millisecond-scale; zero matches = zero injection; per-topic digest ≤300 tokens, top-K ≤4, total budget ≤1.5k tokens — all configurable.
+- **Observable, tunable injection**: every turn writes an Injection Log (hits, scores, near-misses, budget usage); `/wiki stats` reports hit rate, top-N, near-miss distribution, and tuning suggestions — tune from evidence, not vibes.
+- **Knowledge as a graph**: `depends` (machine-readable directed edges) plus body `[[wikilinks]]` and markdown links (human-written edges) form one graph; retrieval walks it in both directions (per-level decay, configurable depth) so a single hit pulls in a knowledge subgraph; every write rebuilds the `meta/backlinks.json` reverse index, and `/wiki show` lists "who references me, and how" — check the blast radius before changing a conclusion.
+- **Two-stage observer (M2)**: the main model jots atomic observations with `topic_observe`; a background distill lane (session end + every N turns, model configurable) distills them into formal Topics in batches; when the model itself deems something worth keeping, it `topic_save`s directly.
 
-| 模型工具 | 用途 |
+## Quick start
+
+1. Install (command below), restart dsh;
+2. Run `/wiki onboard` — native dsh ask-user panels walk you through the five decisions: mode / repo / distill model / injection tier / auto-observe — nothing is written until the final confirm;
+3. Work as usual: relevant conclusions are injected every turn; say "remember…" to have the model `topic_save`; `/wiki status` for health, `/wiki stats` for injection stats.
+
+## Tools & commands
+
+| Model tools | Purpose |
 |---|---|
-| `topic_save` | 沉淀/修订一个 Topic（名字/依赖/未决问题/结论/影响/建议） |
-| `topic_observe` | 随手记一条原子观察（decision/finding/constraint/question），等蒸馏 |
-| `topic_search` | 免 LLM 关键词检索记忆 |
-| `topic_history` | 某 Topic 的结论变更史（git log 工具化） |
+| `topic_save` | Distill/revise a Topic (name / dependencies / open questions / conclusion / impact / recommendations) |
+| `topic_observe` | Jot an atomic observation (decision/finding/constraint/question), pending distill |
+| `topic_search` | LLM-free keyword search over memory |
+| `topic_history` | A topic's conclusion change history (git log as a tool) |
 
-| 命令 | 用途 |
+| Command | Purpose |
 |---|---|
-| `/wiki onboard` | 交互式配置向导：唤起 dsh 原生 ask-user 面板逐项问答（模式 / 仓库 / 蒸馏 / 注入档位 / 自动观察），末步确认才写入；无 ask-user UI 的环境自动退化为逐条输入 |
-| `/wiki status` | bundle 健康：topic 数、观察积压、冲突、同步状态 |
-| `/wiki stats` | 注入统计：hit rate、top-N、near-miss 分布与调参建议 |
-| `/wiki list` / `show` / `history` | 浏览 Topic、反向引用与变更史 |
-| `/wiki graph` | 生成关系图网页（力导向、可拖拽缩放、悬停看结论）并自动在浏览器打开 |
-| `/wiki sync [pull\|push]` | GitHub 模式手动同步 |
-| `/wiki config` / `set <key> <value>` | 查看与修改配置（阈值、预算、蒸馏模型等） |
+| `/wiki onboard` | Interactive setup wizard on dsh-native ask-user panels (mode / repo / distill model / injection tier / auto-observe); typed fallback where no ask-user UI exists |
+| `/wiki status` | Bundle health: topic count, observation backlog, conflicts, sync status |
+| `/wiki stats` | Injection stats: hit rate, top-N, near-miss distribution, tuning advice |
+| `/wiki list` / `show` / `history` | Browse topics, backlinks, and change history |
+| `/wiki graph` | Generate a relationship-graph web page (force-directed, draggable/zoomable, hover for conclusions) and open it in the browser |
+| `/wiki sync [pull\|push]` | GitHub mode: manual pull/push (automatic by default) |
+| `/wiki config` / `set <key> <value>` | View and edit config (thresholds, budgets, distill model, …) |
 
-## 安装
+## Install
 
 ```bash
-dsh plugin --profile <你的profile> add @aiwayds/dsh-llmwiki-memory
+dsh plugin --profile <your profile> add @aiwayds/dsh-llmwiki-memory
 ```
 
-Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好后的第一件事：跑 `/wiki onboard`——直接弹出 dsh 原生 ask-user 交互面板逐项问答（TUI 面板 / 浏览器会话 / 飞书卡自动适配，feishu 侧装了 dsh-ask-router 还能双端竞答）。GitHub 同步：`/wiki set repo <owner/name>`（建议仓库名 `dsh-wiki-memory`，与插件源码仓区分开），凭据走 `$GITHUB_TOKEN` 或已登录的 gh CLI（登录不是本插件职责）。
+First thing after installing: run `/wiki onboard`. The bundle lives at `~/.dsh/llmwiki/` by default (`$DSH_LLMWIKI_HOME` overrides). GitHub sync: `/wiki set repo <owner/name>` (suggested repo name `dsh-wiki-memory`, to keep it distinct from the plugin's own source repo); credentials come from `$GITHUB_TOKEN` or a logged-in gh CLI (login is not this plugin's job).
 
-## 快速上手
+## Configuration
 
-1. 安装（上方命令），重启 dsh；
-2. 跑 `/wiki onboard`，在 ask-user 面板里走完 模式 / 仓库 / 蒸馏模型 / 注入档位 / 自动观察 五个决定——末步确认才写入；
-3. 正常干活：相关结论每轮自动注入；说「记住…」让模型 `topic_save`；`/wiki status` 看健康，`/wiki stats` 看注入命中。
+First-time setup belongs to `/wiki onboard`; day-to-day tuning is `/wiki set <key> <value>` (writes the `llmwiki` namespace in `settings.yaml`, effective from the next session). All keys and defaults:
 
-## 配置
-
-首次配置交给 `/wiki onboard`；日常微调用 `/wiki set <key> <value>`（写 `settings.yaml` 的 `llmwiki` namespace，下次会话启动生效）。全部键与默认值：
-
-| 键 | 默认 | 说明 |
+| Key | Default | Meaning |
 |---|---|---|
-| `repo` | 空（local-only） | GitHub 同步仓 `owner/name`；建议 `dsh-wiki-memory`；置空回 local-only |
-| `autoInject` | `true` | 每轮注入总开关 |
-| `topK` | `4` | 每轮最多注入的 Topic 数 |
-| `perTopicBudget` | `300` | 单 Topic 摘要 token 预算 |
-| `totalBudget` | `1500` | 每轮注入总预算 |
-| `matchThreshold` | `0.3` | 命中阈值；按 `/wiki stats` 的 near-miss 证据调 |
-| `tagBoost` | `0.15` | tag 命中加成 |
-| `graphDepth` | `2` | `depends` 图双向游走深度（0 关闭） |
-| `recencyWindowDays` | `7` | 近因加分窗口（+0.2） |
-| `autoObserve` | `true` | 每轮自动抓原子观察 |
-| `includeSubagents` | `true` | 注入与观察是否作用于子代理会话（ADR 0011）；`off` = 子代理整体跳过 |
-| `observationMaxChars` | `2000` | 每侧每轮观察截断长度 |
-| `distillProvider` / `distillModel` | 空（蒸馏关闭） | 蒸馏 lane 模型路由，两者都设置才启用 |
-| `distillEveryTurns` | `20` | 长 session 每 N 轮触发一次蒸馏 |
-| `distillOnSessionEnd` | `true` | session 结束时蒸馏一次 |
-| `pushDebounceSeconds` | `45` | GitHub 模式去抖推送间隔 |
+| `repo` | empty (local-only) | GitHub sync repo `owner/name`; suggested `dsh-wiki-memory`; empty = back to local-only |
+| `autoInject` | `true` | Per-turn injection master switch |
+| `topK` | `4` | Max topics injected per turn |
+| `perTopicBudget` | `300` | Per-topic digest token budget |
+| `totalBudget` | `1500` | Total injection budget per turn |
+| `matchThreshold` | `0.3` | Hit threshold; tune from `/wiki stats` near-miss evidence |
+| `tagBoost` | `0.15` | Additive boost per tag hit |
+| `graphDepth` | `2` | `depends` graph walk depth (0 disables) |
+| `recencyWindowDays` | `7` | Recency bonus window (+0.2) |
+| `autoObserve` | `true` | Capture atomic observations every turn |
+| `includeSubagents` | `true` | Whether injection and observation also engage subagent sessions (ADR 0011); `off` skips them entirely |
+| `observationMaxChars` | `2000` | Per-side per-turn observation truncation |
+| `distillProvider` / `distillModel` | empty (distill off) | Distill lane model route; both must be set to enable |
+| `distillEveryTurns` | `20` | Distill every N turns of a long session |
+| `distillOnSessionEnd` | `true` | Distill once when a session ends |
+| `pushDebounceSeconds` | `45` | GitHub-mode debounced push interval |
 
 ## Acknowledgements
 
-本项目的形态直接受以下项目的启发与支撑：
+This project's shape is directly inspired and supported by:
 
-- **[zosmaai/pi-llm-wiki](https://github.com/zosmaai/pi-llm-wiki)** — pi 上的原生 OKF v0.2 知识库扩展，本项目的直接灵感来源。其两段式观察（便宜的原子观察 + 后台蒸馏）、缓存安全注入（易变内容不进 system prompt）、分层 vault 与 ownership 模型都被本设计吸收。
-- **[GoogleCloudPlatform/open-knowledge-format](https://github.com/GoogleCloudPlatform/open-knowledge-format)** — Open Knowledge Format (OKF) v0.2 规范，本项目 Bundle 格式严格遵循的标准。
-- **[Karpathy 的 LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)** — 整个 LLM 维护个人知识库方法论 的起点。
-- **[fan56/pi-topic-memory](https://github.com/fan56/pi-topic-memory)** — 同作者的前作：pi 上的工作 topic 台账与静默注入扩展，其热路径免 LLM 匹配与注入时序经验是本项目的直接技术前身。
-- **[chancelu/dsh-llmwiki](https://github.com/chancelu/dsh-llmwiki)** — dsh 生态的同类先例，本项目的同轮注入 seam（`agent/inbox/spliced` + `systemPrompt.context()`）沿用了它在真实 dsh 上验证过的机制。
+- **[zosmaai/pi-llm-wiki](https://github.com/zosmaai/pi-llm-wiki)** — a native OKF v0.2 knowledge extension for pi and this project's direct inspiration; its two-stage observation (cheap atomic observations + background distill), cache-safe injection (volatile content never enters the system prompt), and layered vault & ownership model are all absorbed here.
+- **[GoogleCloudPlatform/open-knowledge-format](https://github.com/GoogleCloudPlatform/open-knowledge-format)** — the Open Knowledge Format (OKF) v0.2 spec this bundle format strictly follows.
+- **[Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a5bf55591489e981c11519de94f)** — the starting point of the whole "an LLM maintains a personal knowledge base" methodology.
+- **[fan56/pi-topic-memory](https://github.com/fan56/pi-topic-memory)** — the same author's predecessor: a working topic ledger with silent injection for pi; its LLM-free hot-path matching and injection-timing experience is this project's direct technical ancestor.
+- **[chancelu/dsh-llmwiki](https://github.com/chancelu/dsh-llmwiki)** — a fellow dsh-ecosystem precedent; this project's same-turn injection seam (`agent/inbox/spliced` + `systemPrompt.context()`) follows the mechanism it validated on real dsh.
 
-## 已知边界
+## Known boundaries
 
-- **子代理默认参与记忆，可整体关掉**：默认（`include-subagents` 开）注入与观察同样作用于子代理会话。`/wiki set include-subagents off` 后，delegation depth > 0 的子代理会话被整体跳过——不注入、不观察、不触发蒸馏；topic 工具始终在全局层（子代理显式 `topic_save` 不受开关影响）。跨进程子代理（claude-code/codex 等 provider）本就不加载本插件。
-- **headless 单发会话里的 session-end 蒸馏**：蒸馏 lane 在 turn/end 触发后异步执行，而 headless 进程答完即退，真实模型调用（秒级）大概率输给进程退出。多轮长会话（tui/web）里每 N 轮的蒸馏不受影响；`meta/distill-state.json` 记录每次 lane 的结局，`/wiki status` 可查。
-- **配置读取时机**：`/wiki set` 与 settings.yaml 修改在下次会话启动后生效最稳。
+- **Subagents engage memory by default — one switch to opt out**: by default (`include-subagents` on), injection and observation apply to subagent sessions too. `/wiki set include-subagents off` skips delegated sessions entirely — no injection, no observation, no distill triggers; the topic tools stay on the global layer, so an explicit `topic_save` from a child still lands. Out-of-process subagents (claude-code/codex providers) never load this plugin anyway.
+- **Session-end distill in headless one-shot sessions**: the distill lane runs asynchronously after turn/end fires, and a headless process exits right after answering — a real model call (seconds) mostly loses the race against process exit. Multi-turn long sessions (tui/web) are unaffected for the every-N-turns distill; `meta/distill-state.json` records each lane's outcome, checkable via `/wiki status`.
+- **Config read timing**: `/wiki set` and `settings.yaml` edits take effect most reliably from the next session start.
 
-## 设计文档
+## Design docs
 
-- [CONTEXT.md](CONTEXT.md) — 领域术语表
-- [docs/adr/](docs/adr/) — 0001–0008：OKF 合规、Remote 形态、同步策略、两段式 Observer、Bundle 布局、注入默认值、可观测与调参、双模式持久化
+- [CONTEXT.md](CONTEXT.md) — domain glossary
+- [docs/adr/](docs/adr/) — 0001–0011: OKF compliance, remote shape, sync strategy, two-stage observer, bundle layout, injection defaults, observability & tunables, dual-mode persistence, onboarding wizard, subagent isolation, the include-subagents switch
 
 ## License
 
