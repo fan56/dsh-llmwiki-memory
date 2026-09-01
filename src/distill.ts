@@ -317,6 +317,13 @@ export function pickLiveLlm(candidates: readonly (LlmCandidateShape | undefined)
  * ordered instance candidates ([scoped, root] in production); the first one
  * whose live routes contain the configured provider wins. Returns undefined
  * until the llm service and a configured route both exist.
+ *
+ * dsh 0.1.2-alpha.3 seam shape: `GenerateOptions.purpose` is the closed union
+ * `'compaction' | 'session-title'` — a distill call has no sanctioned value
+ * there, so it stays unset (ordinary-conversation classification). `sessionId`
+ * is `Branded<'SessionId'>`, stamped by the agent loop for request routing and
+ * replay cursors; this lane runs outside the loop (often after session end),
+ * so it stays unset too. `deepFreeze` moved to @deepseek-ai/dsh-util-values.
  */
 export function defaultModelCaller(
   getCandidates: () => readonly (LlmCandidateShape | undefined)[],
@@ -326,7 +333,8 @@ export function defaultModelCaller(
     const route = getRoute()
     if (route === undefined) throw new Error('distill route not configured (set distill-provider and distill-model)')
     const llm = pickLiveLlm(getCandidates(), route.provider)
-    const { BlockAssembler, createUserMessage, deepFreeze } = await import('@deepseek-ai/dsh-llm')
+    const { BlockAssembler, createUserMessage } = await import('@deepseek-ai/dsh-llm')
+    const { deepFreeze } = await import('@deepseek-ai/dsh-util-values')
     const messages = [
       createUserMessage({
         content: [{ type: 'text', text: req.user }],
@@ -339,8 +347,6 @@ export function defaultModelCaller(
       messages,
       system: req.system,
       maxTokens: req.maxTokens,
-      sessionId: req.sessionId,
-      purpose: req.purpose,
       signal: req.signal,
     })
     const assembler = new BlockAssembler()
