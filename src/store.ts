@@ -48,6 +48,8 @@ export interface Observation {
   sessionId?: string
   distilled: boolean
   distilledInto?: string[]
+  /** Failed distill attempts: fed to the model but consumed by no op (GC counter). */
+  attempts?: number
 }
 
 export interface SaveResult {
@@ -392,6 +394,53 @@ export class BundleStore {
         await this.commit(['meta/observations.jsonl'], `wiki(meta): distill ${ids.length} observation(s) into ${intoSlugs.join(', ')}`)
       }
       return changed
+    })
+  }
+
+  /**
+   * GC policy for the distill lane: an observation fed to the model but left
+   * unconsumed by any op has failed one attempt; after OBSERVATION_MAX_ATTEMPTS
+   * failed attempts it is physically deleted. The user explicitly authorized
+   * deleting raw observations the lane demonstrably cannot process — the
+   * alternative is the same head haunting the backlog forever. Consumed
+   * observations leave the pool via markDistilled and never accrue attempts.
+   */
+  static readonly OBSERVATION_MAX_ATTEMPTS = 3
+
+  /**
+   * Post-run GC bookkeeping: increment `attempts` for every observation in
+   * `fedIds` that no op in `consumedIds` accounts for, then delete those that
+   * reached OBSERVATION_MAX_ATTEMPTS. Returns the deletion count (the caller
+   * records it in the distill-state detail). Increments persist with the
+   * usual flush cadence; a deletion commits immediately — destroying data
+   * must be traceable in git.
+   */
+  async recordUnconsumed(fedIds: readonly string[], consumedIds: readonly string[]): Promise<{ dropped: number }> {
+    return this.enqueue(async () => {
+      const all = await this.allObservations(2000)
+      const fed = new Set(fedIds)
+      const consumed = new Set(consumedIds)
+      let changed = 0
+      let dropped = 0
+      const kept: Observation[] = []
+      for (const o of all) {
+        if (fed.has(o.id) && !consumed.has(o.id) && !o.distilled) {
+          o.attempts = (o.attempts ?? 0) + 1
+          changed += 1
+        }
+        if (!o.distilled && (o.attempts ?? 0) >= BundleStore.OBSERVATION_MAX_ATTEMPTS) {
+          dropped += 1
+          continue
+        }
+        kept.push(o)
+      }
+      if (changed > 0 || dropped > 0) {
+        await atomicWrite(this.observationsPath(), kept.map((o) => `${JSON.stringify(o)}\n`).join(''))
+      }
+      if (dropped > 0) {
+        await this.commit(['meta/observations.jsonl'], `wiki(meta): gc ${dropped} unprocessable observation(s)`)
+      }
+      return { dropped }
     })
   }
 

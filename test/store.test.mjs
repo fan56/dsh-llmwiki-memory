@@ -198,3 +198,51 @@ test('store: readTopic rejects reserved filenames', async () => {
     cleanup()
   }
 })
+
+test('store: recordUnconsumed counts attempts and gc-deletes at the third strike', async () => {
+  const { store, cleanup } = tmpStore()
+  try {
+    await store.ensure()
+    const o1 = await store.appendObservation({ kind: 'turn', source: 'auto', text: '反复喂' })
+    const o2 = await store.appendObservation({ kind: 'finding', source: 'auto', text: '会被消费' })
+    const o3 = await store.appendObservation({ kind: 'turn', source: 'auto', text: '从不喂它' })
+    // Run 1: o1 fed and left unconsumed (+1), o2 fed and consumed (no attempt).
+    let r = await store.recordUnconsumed([o1.id, o2.id], [o2.id])
+    assert.equal(r.dropped, 0)
+    let all = await store.allObservations()
+    assert.equal(all.find((o) => o.id === o1.id).attempts, 1)
+    assert.equal(all.find((o) => o.id === o2.id).attempts, undefined, 'consumed observations never accrue attempts')
+    assert.equal(all.find((o) => o.id === o3.id).attempts, undefined, 'unfed observations are untouched')
+    // Run 2: second strike, still alive.
+    await store.recordUnconsumed([o1.id], [])
+    assert.equal((await store.allObservations()).find((o) => o.id === o1.id).attempts, 2)
+    // Run 3: third strike deletes o1 and nothing else.
+    r = await store.recordUnconsumed([o1.id], [])
+    assert.equal(r.dropped, 1)
+    all = await store.allObservations()
+    assert.equal(all.find((o) => o.id === o1.id), undefined, 'three strikes and the observation is gone')
+    assert.equal(all.length, 2)
+    assert.equal((await store.undistilledObservations()).length, 2)
+  } finally {
+    cleanup()
+  }
+})
+
+test('store: recordUnconsumed never touches distilled observations', async () => {
+  const { store, cleanup } = tmpStore()
+  try {
+    await store.ensure()
+    const o1 = await store.appendObservation({ kind: 'turn', source: 'auto', text: '先失败后被消费' })
+    // One failed attempt, then the observation is consumed: from that moment
+    // it is GC-immune even when fed to the model again.
+    await store.recordUnconsumed([o1.id], [])
+    await store.markDistilled([o1.id], ['topic-a'])
+    const r = await store.recordUnconsumed([o1.id], [])
+    assert.equal(r.dropped, 0)
+    const all = await store.allObservations()
+    assert.equal(all.length, 1)
+    assert.equal(all[0].attempts, 1, 'the pre-consumption attempt is preserved; no new one accrues')
+  } finally {
+    cleanup()
+  }
+})
