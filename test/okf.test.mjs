@@ -77,6 +77,31 @@ test('parseTopicDoc: status validated', () => {
   assert.equal(parseTopicDoc('---\ntype: Topic\ntitle: t\n---\n').fm.status, 'draft')
 })
 
+test('parseTopicDoc: quoted list items carrying ": " parse as strings (round-trip safe)', () => {
+  // Regression for the 3 damaged topic files: a quoted `- "id-token: write"`
+  // item inside a list field must stay a string — parsing it as a map broke
+  // asStringArray with "list entries must be strings".
+  const doc = parseTopicDoc(serializeTopicDoc({
+    fm: {
+      type: 'Topic',
+      title: 't',
+      tags: ['id-token: write'],
+      depends: ['topics/a.md'],
+      open_questions: ['所有 link: 模式部署的 dsh 插件如何迁移？'],
+      impact: ['id-token: write'],
+      status: 'draft',
+      generated: { by: 'agent:test', at: '2026-09-01T00:00:00Z' },
+    },
+    body: '# Conclusion\n\nx\n',
+  }))
+  assert.deepEqual(doc.fm.tags, ['id-token: write'])
+  assert.deepEqual(doc.fm.impact, ['id-token: write'])
+  assert.equal(doc.fm.open_questions[0], '所有 link: 模式部署的 dsh 插件如何迁移？')
+  // Literal frontmatter (as produced by the writer before the fix) parses too.
+  const literal = `---\ntype: Topic\ntitle: t\nimpact:\n  - "id-token: write"\n---\n`
+  assert.deepEqual(parseTopicDoc(literal).fm.impact, ['id-token: write'])
+})
+
 test('sections: split / sectionOf / setSection', () => {
   const doc = parseTopicDoc(SAMPLE)
   assert.deepEqual(splitSections(doc.body).map((s) => s.heading), ['Conclusion', 'Recommendations'])

@@ -119,3 +119,51 @@ test('serialize: empty containers', () => {
   const back = parseYaml(stringifyYaml({ tags: [], map: {} }))
   assert.deepEqual(back, { tags: [], map: {} })
 })
+
+test('parse: quoted block-list items with ": " are strings, not inline maps', () => {
+  // Regression: the writer quotes scalars containing ": " (needsQuote), so a
+  // quoted list item such as `- "id-token: write"` must read back as the
+  // string, never as a `{ "id-token": write }` map.
+  const y = parseYaml([
+    'impact:',
+    '  - "所有 link: 模式部署的 dsh 插件"',
+    '  - "id-token: write"',
+    "  - 'single: quoted'",
+  ].join('\n'))
+  assert.deepEqual(y.impact, ['所有 link: 模式部署的 dsh 插件', 'id-token: write', 'single: quoted'])
+  // Round-trip: what the writer emits is read back byte-identical.
+  const rt = parseYaml(stringifyYaml({ list: ['含 : 的引号项', "也含 : 且单引号"] }))
+  assert.deepEqual(rt, { list: ['含 : 的引号项', '也含 : 且单引号'] })
+})
+
+test('parse: unquoted "key: value" block-list items stay inline maps', () => {
+  const y = parseYaml([
+    'sources:',
+    '  - id: s1',
+    '    resource: topics/ref.md',
+    '  - name: bare',
+  ].join('\n'))
+  assert.deepEqual(y.sources, [
+    { id: 's1', resource: 'topics/ref.md' },
+    { name: 'bare' },
+  ])
+})
+
+test('parse: unclosed quote keeps existing behavior (no throw, literal scalar)', () => {
+  const y = parseYaml('list:\n  - "unclosed quote\n  - \'unclosed\n')
+  assert.deepEqual(y.list, ['"unclosed quote', "'unclosed"])
+  // An unclosed quote before ": " still routes through the inline-map branch.
+  const m = parseYaml('list:\n  - "unclosed: value\n')
+  assert.deepEqual(m.list, [{ '"unclosed': 'value' }])
+})
+
+test('parse: full-width colon is a plain scalar, never a map separator', () => {
+  const y = parseYaml([
+    'impact:',
+    '  - 所有 link：模式部署的 dsh 插件',
+    '  - 选项一：包含全角冒号',
+  ].join('\n'))
+  assert.deepEqual(y.impact, ['所有 link：模式部署的 dsh 插件', '选项一：包含全角冒号'])
+  const rt = parseYaml(stringifyYaml({ list: ['a：b'] }))
+  assert.deepEqual(rt, { list: ['a：b'] })
+})

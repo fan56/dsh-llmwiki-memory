@@ -41,6 +41,11 @@ function unquote(s: string): string {
   return s
 }
 
+/** A fully quoted scalar: balanced matching quote pair, allowing surrounding whitespace. */
+function isQuotedScalar(s: string): boolean {
+  return s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))
+}
+
 function scalar(raw: string): unknown {
   const s = raw.trim()
   if (s === '' || s === '~' || s === 'null' || s === 'Null' || s === 'NULL') return null
@@ -119,6 +124,14 @@ function parseBlockArray(lines: Line[], start: number, indent: number): { value:
         arr.push(null)
         i += 1
       }
+      continue
+    }
+    if (isQuotedScalar(raw)) {
+      // Fully quoted scalar first: a quoted item containing `: ` is a string
+      // (e.g. `- "id-token: write"`), never an inline map. The writer quotes
+      // such scalars (needsQuote), so parse must read back exactly what it wrote.
+      arr.push(scalar(raw))
+      i += 1
       continue
     }
     if (raw.includes(': ') || raw.endsWith(':')) {
