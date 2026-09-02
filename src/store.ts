@@ -349,9 +349,14 @@ export class BundleStore {
       distilled: false,
     }
     if (input.sessionId !== undefined) obs.sessionId = input.sessionId
-    await mkdir(this.metaDir(), { recursive: true })
-    await appendFile(this.observationsPath(), `${JSON.stringify(obs)}\n`, 'utf8')
-    return obs
+    // Behind the store-wide queue: markDistilled / recordUnconsumed rewrite
+    // the whole JSONL file — an unsynchronized append here could interleave
+    // with a rewrite and lose either the new observation or the rewrite.
+    return this.enqueue(async () => {
+      await mkdir(this.metaDir(), { recursive: true })
+      await appendFile(this.observationsPath(), `${JSON.stringify(obs)}\n`, 'utf8')
+      return obs
+    })
   }
 
   async allObservations(limit = 500): Promise<Observation[]> {
