@@ -76,7 +76,7 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 | `distillEveryTurns` | `5` | 长 session 每 N 轮触发一次蒸馏 |
 | `distillOnSessionEnd` | `true` | session 结束时蒸馏一次 |
 | `distillBatchSize` | `40` | 每次蒸馏模型调用携带的观察条数。遇输出上限（`max-tokens`）失败自动减半重试（下限 5），失败批次不再活锁积压；缩小状态跨 run 保持，直到插件重载或配置变更。注意：`/wiki set distillBatchSize` 重设为同值不触发复位，需设为不同值或重载插件 |
-| `distillMaxModelCalls` | `3` | 单次蒸馏 run 的模型调用预算，含 ops 未回显有效 `observed_ids` 时的纠错重试（至多一次，预算放不下即零消费停机）。预算耗尽即停，已成功的批次照常 markDistilled（部分前进优于零前进），distill state 记 `partial: …` |
+| `distillMaxModelCalls` | `8` | 单次蒸馏 run 的模型调用预算，含 ops 未回显有效 `observed_ids` 时的纠错重试（至多一次，预算放不下即零消费停机）。预算耗尽即停，已成功的批次照常 markDistilled（部分前进优于零前进），distill state 记 `partial: …` |
 | `pushDebounceSeconds` | `45` | GitHub 模式去抖推送间隔 |
 
 ## Acknowledgements

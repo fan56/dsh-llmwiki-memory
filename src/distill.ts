@@ -45,6 +45,8 @@ export interface DistillResult {
   created: string[]
   updated: string[]
   marked: number
+  /** Observations deleted by the post-run GC this run (present when > 0). */
+  gcDropped?: number
   detail?: string
 }
 
@@ -68,7 +70,7 @@ export const SYSTEM_PROMPT = [
 const MIN_BATCH_SIZE = 5
 /** Fallbacks when the config fields are absent (bare test harnesses). */
 const DEFAULT_BATCH_SIZE = 40
-const DEFAULT_MAX_MODEL_CALLS = 3
+const DEFAULT_MAX_MODEL_CALLS = 8
 
 /** Minimal observation surface the batch payload needs (structural, no store import). */
 interface ObservationLike {
@@ -93,6 +95,8 @@ interface BatchOutcome {
   maxTokens?: boolean
   /** Non-retryable call failure classification (parse or stream error). */
   fatalReason?: 'model-error' | 'invalid-output'
+  /** Batch ids an op actually consumed — the GC's consumed set for this batch. */
+  consumedIds?: string[]
   detail?: string
   /**
    * Specific zero-consumption explanation for the stalled stop (undefined =
@@ -153,9 +157,10 @@ export class Distiller {
    * Fire-and-forget from the observer; dedups concurrent runs per session.
    * Returns the run promise (undefined when deduped or unconfigured) so the
    * caller can hook post-run cleanup — the per-session llm capture in
-   * index.ts must live exactly as long as a run that may read it.
+   * index.ts must live exactly as long as a run that may read it. `manual`
+   * is the /wiki distill trigger: same lane, same in-flight guard.
    */
-  request(sessionId: string, reason: 'every-n' | 'session-end'): Promise<DistillResult> | undefined {
+  request(sessionId: string, reason: 'every-n' | 'session-end' | 'manual'): Promise<DistillResult> | undefined {
     if (!this.configured) return undefined
     if (this.inFlight.has(sessionId)) return undefined
     const run = this.run(sessionId).finally(() => this.inFlight.delete(sessionId))
@@ -171,6 +176,14 @@ export class Distiller {
 
   async run(sessionId?: string): Promise<DistillResult> {
     const result = await this.runInner(sessionId)
+    // The GC count rides the detail (and the state file) so /wiki status and
+    // e2e diagnostics see how many observations were deleted, not just marked.
+    const gcNote =
+      result.gcDropped !== undefined && result.gcDropped > 0
+        ? `；gc: dropped ${result.gcDropped} unprocessable observation(s)`
+        : ''
+    const detail =
+      result.detail === undefined ? (gcNote === '' ? undefined : gcNote.replace(/^；/, '')) : `${result.detail}${gcNote}`
     // Persist the outcome — /wiki status and e2e diagnostics both read it.
     await this.service.store
       .writeDistillState({
@@ -180,10 +193,11 @@ export class Distiller {
         created: result.created,
         updated: result.updated,
         marked: result.marked,
-        detail: result.detail,
+        gcDropped: result.gcDropped,
+        detail,
       })
       .catch(() => undefined)
-    return result
+    return { ...result, detail }
   }
 
   private async runInner(sessionId?: string): Promise<DistillResult> {
@@ -214,6 +228,11 @@ export class Distiller {
     let firstFetch = true
     let filteredTotal = 0
     let stallDetail: string | undefined
+    // GC bookkeeping (store.recordUnconsumed): every id actually fed to the
+    // model this run minus the ids an op consumed = one failed attempt per
+    // observation; three failed attempts delete it from the pool.
+    const fedIds = new Set<string>()
+    const consumedRunIds = new Set<string>()
     for (;;) {
       const observations = await this.service.store.undistilledObservations(this.batchSize)
       if (observations.length === 0) {
@@ -227,10 +246,15 @@ export class Distiller {
         stopped = 'budget'
         break
       }
+      // The batch is about to be handed to the model: from here its
+      // observations are on the hook for a failed attempt if no op consumes
+      // them this run.
+      for (const o of observations) fedIds.add(o.id)
       // The batch spends 1 call, or 2 when the corrective observed_ids retry
       // fires — the budget check above already guaranteed room for both.
       const outcome = await this.runBatch(sessionId, observations, maxCalls - calls)
       calls += Math.max(1, outcome.callsUsed ?? 1)
+      for (const id of outcome.consumedIds ?? []) consumedRunIds.add(id)
       filteredTotal += outcome.filteredIds ?? 0
       created.push(...outcome.created)
       updated.push(...outcome.updated)
@@ -268,9 +292,49 @@ export class Distiller {
         break
       }
     }
+    // Post-run GC: every fed-but-unconsumed observation gains a failed
+    // attempt; three strikes delete it. Best-effort — never fail a run over
+    // bookkeeping.
+    let gcDropped: number | undefined
+    if (fedIds.size > 0) {
+      try {
+        const { dropped } = await this.service.store.recordUnconsumed([...fedIds], [...consumedRunIds])
+        if (dropped > 0) gcDropped = dropped
+      } catch {
+        // contained — the run result stands without the GC note
+      }
+    }
     const progress = created.length + updated.length > 0
-    if (!progress) {
-      return {
+    let result: DistillResult
+    if (progress) {
+      const head =
+        stopped === 'budget'
+          ? `已达单次 run 模型调用预算（${calls}/${maxCalls}），剩余积压留待后续 run`
+          : stopped === 'max-tokens'
+            ? '随后批次触发输出上限，本轮停止'
+            : stopped === 'failure'
+              ? `随后批次失败，本轮停止：${failureDetail ?? 'unknown'}`
+              : stopped === 'no-ops'
+                ? '后续批次模型未产出 ops，本轮停止'
+                : stopped === 'stalled'
+                  ? `后续批次未消费任何观察，本轮停止${stallDetail !== undefined ? `：${stallDetail}` : ''}`
+                  : undefined
+      const filteredNote = filteredTotal > 0 ? `；filtered ${filteredTotal} invalid observed_ids` : ''
+      const base = head === undefined ? undefined : `partial: 已蒸馏标记 ${marked} 条观察（${calls} 次模型调用）；${head}`
+      result = {
+        ok: true,
+        created,
+        updated,
+        marked,
+        detail:
+          base === undefined
+            ? filteredNote === ''
+              ? undefined
+              : filteredNote.replace(/^；/, '')
+            : `${base}${filteredNote}`,
+      }
+    } else {
+      result = {
         ok: false,
         reason:
           failureReason ??
@@ -288,32 +352,8 @@ export class Distiller {
             : undefined),
       }
     }
-    const head =
-      stopped === 'budget'
-        ? `已达单次 run 模型调用预算（${calls}/${maxCalls}），剩余积压留待后续 run`
-        : stopped === 'max-tokens'
-          ? '随后批次触发输出上限，本轮停止'
-          : stopped === 'failure'
-            ? `随后批次失败，本轮停止：${failureDetail ?? 'unknown'}`
-            : stopped === 'no-ops'
-              ? '后续批次模型未产出 ops，本轮停止'
-              : stopped === 'stalled'
-                ? `后续批次未消费任何观察，本轮停止${stallDetail !== undefined ? `：${stallDetail}` : ''}`
-                : undefined
-    const filteredNote = filteredTotal > 0 ? `；filtered ${filteredTotal} invalid observed_ids` : ''
-    const base = head === undefined ? undefined : `partial: 已蒸馏标记 ${marked} 条观察（${calls} 次模型调用）；${head}`
-    return {
-      ok: true,
-      created,
-      updated,
-      marked,
-      detail:
-        base === undefined
-          ? filteredNote === ''
-            ? undefined
-            : filteredNote.replace(/^；/, '')
-          : `${base}${filteredNote}`,
-    }
+    if (gcDropped !== undefined) result.gcDropped = gcDropped
+    return result
   }
 
   /**
@@ -435,7 +475,14 @@ export class Distiller {
       marked = await this.service.store.markDistilled(applied.consumedIds, applied.consumedSlugs)
     }
     void this.service.sync?.schedulePush()
-    return { created: applied.created, updated: applied.updated, marked, callsUsed, filteredIds: applied.filteredIds }
+    return {
+      created: applied.created,
+      updated: applied.updated,
+      marked,
+      callsUsed,
+      filteredIds: applied.filteredIds,
+      consumedIds: applied.consumedIds,
+    }
   }
 
   /**

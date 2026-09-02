@@ -43,8 +43,10 @@ export const LlmwikiConfig = z.object({
   distillModel: z.string().default(''),
   /** Observations per distill model call; auto-halves on output-limit failures (floor 5). */
   distillBatchSize: z.number().default(40),
-  /** Max model calls per distill run — successful batches keep their marks (partial progress). */
-  distillMaxModelCalls: z.number().default(3),
+  /** Max model calls per distill run — successful batches keep their marks (partial progress).
+   *  Default 8: with the batch loop, one run then drains ~30-40 observations
+   *  instead of ~10, which is what makes a real backlog actually shrink. */
+  distillMaxModelCalls: z.number().default(8),
   /** Debounced push delay in GitHub mode. */
   pushDebounceSeconds: z.number().default(45),
 })

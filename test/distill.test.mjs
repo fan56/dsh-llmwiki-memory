@@ -769,3 +769,55 @@ test('distiller: corrective retry that fails to produce ops stalls readably with
     h.cleanup()
   }
 })
+
+// ---- post-run GC: fed-but-unconsumed observations age out after three strikes ----
+
+test('distiller: unconsumed observations accrue attempts; the third strike gc-drops into the detail', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await h.store.appendObservation({ kind: 'finding', source: 'auto', text: '没人要' })
+    // The model deliberately skips the observation every run (empty ops).
+    const d = new Distiller(h.service, async () => JSON.stringify({ ops: [] }))
+    const r1 = await d.run('s1')
+    assert.equal(r1.reason, 'no-ops')
+    assert.equal((await h.store.allObservations())[0].attempts, 1)
+    await d.run('s1')
+    assert.equal((await h.store.allObservations())[0].attempts, 2)
+    const r3 = await d.run('s1')
+    assert.equal(r3.reason, 'no-ops')
+    assert.equal(r3.gcDropped, 1, 'the third failed attempt deletes the observation')
+    assert.match(r3.detail ?? '', /gc: dropped 1 unprocessable observation\(s\)/)
+    assert.equal((await h.store.readDistillState())?.gcDropped, 1, 'the deletion count is persisted in the state file')
+    assert.equal((await h.store.allObservations()).length, 0, 'the pool no longer haunts the backlog')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: consumed observations never accrue attempts; only the leftovers do', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    const kept = await h.store.appendObservation({ kind: 'finding', source: 'auto', text: '会被消费' })
+    const left = await h.store.appendObservation({ kind: 'finding', source: 'auto', text: '没人要' })
+    // The model consumes kept.id in every call; once kept is marked, the
+    // follow-up batches can only stall around left — exactly one failed
+    // attempt for the leftover, none for the consumed one.
+    const d = new Distiller(h.service, async () =>
+      JSON.stringify({ ops: [{ op: 'create', title: 'T', conclusion: '结论', observed_ids: [kept.id] }] }),
+    )
+    const r = await d.run('s1')
+    assert.equal(r.ok, true)
+    assert.equal(r.marked, 1)
+    const all = await h.store.allObservations()
+    const consumedRec = all.find((o) => o.id === kept.id)
+    assert.equal(consumedRec.distilled, true, 'the consumed observation left the candidate pool via markDistilled')
+    assert.equal(consumedRec.attempts, undefined, 'and it never accrued an attempt')
+    assert.equal(all.find((o) => o.id === left.id).attempts, 1)
+    assert.deepEqual((await h.store.undistilledObservations()).map((o) => o.id), [left.id])
+    assert.equal(r.gcDropped, undefined, 'one strike deletes nothing')
+  } finally {
+    h.cleanup()
+  }
+})

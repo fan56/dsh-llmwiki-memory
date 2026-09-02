@@ -76,7 +76,7 @@ First-time setup belongs to `/wiki onboard`; day-to-day tuning is `/wiki set <ke
 | `distillEveryTurns` | `5` | Distill every N turns of a long session |
 | `distillOnSessionEnd` | `true` | Distill once when a session ends |
 | `distillBatchSize` | `40` | Observations per distill model call. On an output-limit (`max-tokens`) failure the batch halves automatically (floor 5) and retries — a failing batch can no longer livelock the backlog; the shrink persists until reload or a config change. Note: `/wiki set distillBatchSize` back to the same value does not reset the shrink — set a different value or reload the plugin |
-| `distillMaxModelCalls` | `3` | Max model calls per distill run, including the one corrective retry for ops echoing no valid `observed_ids` (the run stalls when the budget can't fit it). Batches already distilled keep their marks when the budget stops the run (partial progress), recorded as `partial: …` in the distill state |
+| `distillMaxModelCalls` | `8` | Max model calls per distill run, including the one corrective retry for ops echoing no valid `observed_ids` (the run stalls when the budget can't fit it). Batches already distilled keep their marks when the budget stops the run (partial progress), recorded as `partial: …` in the distill state |
 | `pushDebounceSeconds` | `45` | GitHub-mode debounced push interval |
 
 ## Acknowledgements
