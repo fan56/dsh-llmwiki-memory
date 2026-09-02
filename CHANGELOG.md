@@ -2,6 +2,14 @@
 
 ## 未发布
 
+- 修复蒸馏 100% 失败（NO_ADAPTER 写进 distill-state）的三个根因之一——lane 在无适配器的实例上执行：
+  - 触发时按会话捕获真正的 llm 实例（会话事件、`agent/inbox/spliced`、`agent/disposed` payload 在作用域解绑前），按 `sessionId` 传入 lane，并发会话不再互相覆盖。
+  - `pickLiveLlm` 预检收紧为「必须探测到匹配路由」：无 `listProviders` 的实例不再被信任（无法证明适配器在场），探测失败仍给可读中文错误（无路由 / 无实例两种场景）。
+  - 兜底防线：stream 阶段逃逸的 `NO_ADAPTER`（code 或 message）重抛为可读的双语失败（点名路由与原因），distill-state 不再落裸 `no adapter registered for provider`。
+- 修复会话结束触发是死分支：`agent/disposed` 不在 dsh-session 0.1.2-alpha.4 的 `SessionEventMap` 事件全集里，原先挂在 `session/event` 上的 `event.type === 'agent/disposed'` 分支永远不会 fire；`session/end-seed` 只在 restore/resume 时发，被误当「会话结束」。改为订阅真实销毁事件（cordis 独立事件）：`agent/disposed`（payload `{agent}`，AgentRegistry 解绑时发）与 `session/disposed`（payload Session，store detach 时发）都接入 observer 的结束触发（单发去重，两个事件先后到达不重复触发）；`session/end-seed` 回归「恢复边界」语义（重置结束标记，不再触发蒸馏）。注入去重注册表改由真实销毁事件清除。
+- 默认 `distillEveryTurns` 20 → 5（实测会话最长 8 轮，旧的每 20 轮 cadence 从未触发；会话结束触发修复后，5 轮给普通会话至少一次会话内蒸馏机会）。
+- 修复 YAML round-trip 损坏（生产 3 个 topic 文件各坏 1 行）：块列表项在判定 inline-map 前先做引号感知——成对单/双引号包裹的项视为 quoted 标量并剥离引号，不再被 `- "…: …"` 里的 `: ` 误判成 map；未闭合引号与原有无引号 `- key: value` map 语义不变。补单测覆盖 quoted/round-trip、unquoted-map、未闭合引号容错、全角冒号，以及 `okf.parseTopicDoc` 级别验证含 `id-token: write` 引号列表项的 frontmatter。
+
 - 适配 dsh 宿主 0.1.2-alpha.3，放弃 rc 线兼容（peer 要求 `dsh-llm`/`dsh-tools`/`dsh-settings`/`dsh-commands`/`dsh-util-values` >= 0.1.2-alpha.3；`cordis` ^4.0.2、`schemastery` ^3.18.2；devDeps 精确钉 alpha.3 闭包）：
   - settings 命名空间改字面量 `'llmwiki'`（dsh-settings 0.1.2-alpha.3 删除了模块级 `settingsNamespace()`，注册改类型级品牌校验）；运行时不再 require dsh-settings。
   - 蒸馏 lane 的 LLM seam 对齐 alpha.3 `GenerateOptions`：`deepFreeze` 改从 `@deepseek-ai/dsh-util-values` 动态导入（dsh-llm 不再转发导出）；`purpose` 是封闭联合（仅 `compaction`/`session-title`）与 `sessionId` 为 `Branded<'SessionId'>`（loop 请求路由/回放游标语义），后台蒸馏调用均不再传，插件内 `ModelRequest` seam 保持不变；9d03334 的蒸馏候选预检（pickLiveLlm）与防御性 finish 兼容原样保留，选出的路由走修好的调用形态。
