@@ -238,12 +238,34 @@ export function apply(ctx: Context): void {
           state.injectionText = ''
         }
       }
-      if (event.type === 'session/end-seed' || event.type === 'agent/disposed') {
+      if (event.type === 'session/end-seed') {
+        // Restore/resume boundary: the persisted context is being replayed — a
+        // fresh process has no dedup registry, so allow re-injection.
         injectedBySession.delete(sessionId)
       }
       observer.onSessionEvent(sessionId, event.type, event.data)
     }) as never,
   )
+
+  // ---- Session teardown: real cordis events, not session/event types ----
+  // dsh-session 0.1.2-alpha.4's SessionEventMap has no `agent/disposed` or
+  // `session/disposed` event type — the old `event.type === 'agent/disposed'`
+  // branch on the session/event firehose could never fire. Both real teardown
+  // events are cordis events dispatched with a scope carrier: `agent/disposed`
+  // carries `{ agent }` (AgentRegistry.unregister) and `session/disposed`
+  // carries the Session (store detach). Either fires at teardown, so both feed
+  // the observer's single-fire session-end trigger.
+  for (const [name, sessionIdOf] of [
+    ['agent/disposed', (payload: { agent?: { id?: unknown } }) => String(payload?.agent?.id ?? '')],
+    ['session/disposed', (session: { id?: unknown }) => String(session?.id ?? '')],
+  ] as const) {
+    ctx.on(name as never, ((subject: unknown) => {
+      const sessionId = sessionIdOf(subject as never)
+      if (sessionId === '') return
+      observer.onSessionEvent(sessionId, name, undefined)
+      injectedBySession.delete(sessionId)
+    }) as never)
+  }
 
   // ---- Sync lifecycle: pull on session start, flush on dispose ----
   ctx.on('session/event' as never, ((session: { id: unknown }, event: SessionEvent) => {

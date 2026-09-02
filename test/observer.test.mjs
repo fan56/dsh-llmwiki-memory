@@ -102,13 +102,35 @@ test('observer: every-N turn trigger fires at the configured cadence', async () 
   }
 })
 
-test('observer: session end triggers final distill and drops state', async () => {
+test('observer: session end triggers final distill once and drops state', async () => {
   const h = make()
   try {
-    h.observer.onSessionEvent('s1', 'session/end-seed', {})
-    h.observer.onSessionEvent('s2', 'agent/disposed', {})
+    // Both real teardown events fire for one session — the trigger is single-fire.
+    h.observer.onSessionEvent('s1', 'agent/disposed', {})
+    h.observer.onSessionEvent('s1', 'session/disposed', {})
+    h.observer.onSessionEvent('s2', 'session/disposed', {})
     await new Promise((r) => setTimeout(r, 30))
     assert.equal(h.requests.filter((r) => r.reason === 'session-end').length, 2)
+    assert.deepEqual(
+      h.requests.filter((r) => r.reason === 'session-end').map((r) => r.sessionId),
+      ['s1', 's2'],
+    )
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('observer: session/end-seed is a resume boundary, not a session end', async () => {
+  const h = make()
+  try {
+    // restore/resume must NOT distill: no session has ended yet.
+    h.observer.onSessionEvent('s1', 'session/end-seed', {})
+    await new Promise((r) => setTimeout(r, 30))
+    assert.equal(h.requests.length, 0)
+    // The end-cycle marker is reset: the teardown of the resumed session fires.
+    h.observer.onSessionEvent('s1', 'session/disposed', {})
+    await new Promise((r) => setTimeout(r, 30))
+    assert.deepEqual(h.requests.map((r) => r.reason), ['session-end'])
   } finally {
     h.cleanup()
   }

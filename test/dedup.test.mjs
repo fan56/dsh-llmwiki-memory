@@ -44,6 +44,7 @@ function bootPlugin(overrides = {}) {
   const prevHome = process.env.DSH_LLMWIKI_HOME
   process.env.DSH_LLMWIKI_HOME = root
   const handlers = []
+  const disposedHandlers = {}
   const contexts = []
   const agentsMap = new Map()
   const ctx = {
@@ -56,6 +57,7 @@ function bootPlugin(overrides = {}) {
     agents: { get: (id) => agentsMap.get(String(id)) },
     on: (type, handler) => {
       if (type === 'session/event') handlers.push(handler)
+      else if (type === 'agent/disposed' || type === 'session/disposed') disposedHandlers[type] = handler
     },
     inject: (_deps, cb) => cb({ effect: () => () => {} }),
     effect: () => () => {},
@@ -63,6 +65,14 @@ function bootPlugin(overrides = {}) {
   apply(ctx)
   const onEvent = handlers[0]
   const dispatch = (sessionId, type, data) => onEvent.call(undefined, { id: sessionId }, { type, data })
+  // Real teardown events are cordis events, not session/event types: deliver
+  // them through the recorded disposal handlers with their true payloads.
+  const dispose = (sessionId, type) => {
+    const handler = disposedHandlers[type]
+    if (handler === undefined) throw new Error(`no recorded handler for ${type}`)
+    if (type === 'agent/disposed') handler({ agent: { id: sessionId } })
+    else handler({ id: sessionId })
+  }
   const claim = (sessionId, text) => {
     if (!agentsMap.has(sessionId)) agentsMap.set(sessionId, { inbox: { nextTurn: [], nextStep: [] } })
     agentsMap.get(sessionId).inbox.nextTurn = [userMsg(text)]
@@ -74,7 +84,7 @@ function bootPlugin(overrides = {}) {
     else process.env.DSH_LLMWIKI_HOME = prevHome
     rmSync(root, { recursive: true, force: true })
   }
-  return { root, dispatch, claim, injectedText, cleanup }
+  return { root, dispatch, dispose, claim, injectedText, cleanup }
 }
 
 /** Seed topics through a sibling service on the same bundle root. */
@@ -187,15 +197,21 @@ test('dedup: session end clears the registry — same topic injects again', asyn
     // …and the ended session's own entry is gone (re-claim injects, not deduped).
     h.claim('s1', QUERY_A)
     assert.match(h.injectedText('s1'), /Echo Marker QX7QZ/)
-    // agent/disposed clears too.
+    // The real teardown events clear too (cordis `agent/disposed` carry the
+    // agent; `session/disposed` carry the session).
     h.claim('s3', QUERY_A)
     assert.match(h.injectedText('s3'), /Echo Marker QX7QZ/)
-    h.dispatch('s3', 'agent/disposed', {})
+    h.dispose('s3', 'agent/disposed')
     h.claim('s3', QUERY_A)
     assert.match(h.injectedText('s3'), /Echo Marker QX7QZ/)
-    const records = await readRecords(store, 5)
-    assert.equal(records.length, 5)
-    assert.equal(records.filter((r) => r.injected).length, 5)
+    h.claim('s4', QUERY_A)
+    assert.match(h.injectedText('s4'), /Echo Marker QX7QZ/)
+    h.dispose('s4', 'session/disposed')
+    h.claim('s4', QUERY_A)
+    assert.match(h.injectedText('s4'), /Echo Marker QX7QZ/)
+    const records = await readRecords(store, 7)
+    assert.equal(records.length, 7)
+    assert.equal(records.filter((r) => r.injected).length, 7)
     assert.equal(records.some((r) => r.why === 'dedup'), false)
   } finally {
     h.cleanup()

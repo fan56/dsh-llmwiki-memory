@@ -6,7 +6,10 @@
  *     (cheap, no LLM, size-capped) so the distill lane has material even when
  *     the model never calls topic_observe;
  *   - every N turns: request a distill run (budget-friendly cadence);
- *   - session end (`session/end-seed`) / agent disposal: final distill request.
+ *   - session end (`agent/disposed` / `session/disposed` cordis events, wired
+ *     in index.ts): final distill request. `session/end-seed` is the
+ *     restore/resume boundary, NOT a session end — it resets the end-cycle
+ *     marker instead of triggering.
  *
  * Never throws into the session loop — every hook failure is contained.
  *
@@ -42,6 +45,8 @@ const MAX_CAPTURE = 4000
 
 export class Observer {
   private sessions = new Map<string, SessionState>()
+  /** Sessions whose end trigger already fired; cleared on the resume boundary. */
+  private ended = new Set<string>()
   private readonly service: WikiService
   private readonly onRequestDistill: (sessionId: string, reason: 'every-n' | 'session-end') => void
 
@@ -106,9 +111,21 @@ export class Observer {
         }
         return
       }
-      case 'session/end-seed':
-      case 'agent/disposed': {
-        if (cfg.distillOnSessionEnd) this.onRequestDistill(sessionId, 'session-end')
+      // Real session teardown: both cordis events fire at teardown (agent
+      // unregister then session store detach) — the trigger is single-fire per
+      // session so a double dispatch cannot clobber the first run's outcome.
+      case 'agent/disposed':
+      case 'session/disposed': {
+        if (cfg.distillOnSessionEnd && !this.ended.has(sessionId)) {
+          this.ended.add(sessionId)
+          this.onRequestDistill(sessionId, 'session-end')
+        }
+        this.sessions.delete(sessionId)
+        return
+      }
+      // Restore/resume boundary — a resumed session begins a fresh end cycle.
+      case 'session/end-seed': {
+        this.ended.delete(sessionId)
         this.sessions.delete(sessionId)
         return
       }
