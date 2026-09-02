@@ -14,6 +14,10 @@
   - 自适应批大小：输出上限失败（finish `max-tokens`/`length`，抛点盖 code 戳 `MAX_TOKENS`）自动减半批次重试（下限 5），同一 run 内即完成「40 败 → 20 成」逃逸，失败批次不再永远占住队头；缩小状态跨 run 保持，配置变更或插件重载才复位（无投机自增，避免每 run 重付一次失败调用）。新配置 `distillBatchSize`（默认 40）。
   - 单 run 模型调用预算：新配置 `distillMaxModelCalls`（默认 3），每次调用（含失败重试）都计数；预算耗尽即停，已成功批次照常 markDistilled，distill state 记 `partial: 已蒸馏标记 N 条观察（K 次模型调用）；…`——部分前进优于零前进。
   - 零消费停机：某批 ops 未消费该批任何观察（head 无法前进，重跑只会重复）即停本轮；`no-ops` / 非 max-tokens 失败同样终止本轮，`no-observations` / `no-ops` / `model-error` / `invalid-output` 语义不变。
+- 修复观察零消费缺口（真机实测：蒸馏链路全通但 `marked: 0`、积压零前进——模型返回的 ops 缺失/编造 `observed_ids`，`markDistilled` 无 id 可标，同批观察永远重喂并重复产 topic）：
+  - Prompt 硬约束：system prompt 明确要求每个 op 必须带 `observed_ids` 且只能逐字复制本批输入的观察 id（create 填综合依据、update 填修订动因），缺失/为空/含列表外 id 的 op 无效。
+  - 执行前清洗：每个 op 的 `observed_ids` 先与本批真实 id 集合求交再执行；清洗后零有效 id 的 op 整体扣住不落 topic（无效 topic 写入正是 marks 无法入账、重跑重复的根源），无效 id 数计入 `filtered N invalid observed_ids`（部分有效时进 run detail）。
+  - 一次纠错重试：整批零有效 id 时追加「合法 id 列表 + 逐字回显要求」再调一次模型，计入 `distillMaxModelCalls` 预算（无免预算通道；预算不足直接零消费停机）；重试仍零有效或调用失败 → 走 stalled 停机并在 detail 说明。
 
 - 适配 dsh 宿主 0.1.2-alpha.3，放弃 rc 线兼容（peer 要求 `dsh-llm`/`dsh-tools`/`dsh-settings`/`dsh-commands`/`dsh-util-values` >= 0.1.2-alpha.3；`cordis` ^4.0.2、`schemastery` ^3.18.2；devDeps 精确钉 alpha.3 闭包）：
   - settings 命名空间改字面量 `'llmwiki'`（dsh-settings 0.1.2-alpha.3 删除了模块级 `settingsNamespace()`，注册改类型级品牌校验）；运行时不再 require dsh-settings。
