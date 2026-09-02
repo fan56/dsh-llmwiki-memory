@@ -10,6 +10,10 @@
 - 默认 `distillEveryTurns` 20 → 5（实测会话最长 8 轮，旧的每 20 轮 cadence 从未触发；会话结束触发修复后，5 轮给普通会话至少一次会话内蒸馏机会）。
 - 修复会话级 llm 捕获的慢性泄漏（常驻宿主进程下 `sessionLlm` 每会话净增一份强引用）：蒸馏 run 结算即释放对应条目，teardown（`agent/disposed` / `session/disposed`）时无 in-flight run 也即时删除；两处删除均带 pending 守卫——不会误删 session-end 蒸馏要用的 payload 捕获，也不会误删本 run 结算窗口内下一轮重新捕获的新条目。
 - 修复 YAML round-trip 损坏（生产 3 个 topic 文件各坏 1 行）：块列表项在判定 inline-map 前先做引号感知——成对单/双引号包裹的项视为 quoted 标量并剥离引号，不再被 `- "…: …"` 里的 `: ` 误判成 map；未闭合引号与原有无引号 `- key: value` map 语义不变。补单测覆盖 quoted/round-trip、unquoted-map、未闭合引号容错、全角冒号，以及 `okf.parseTopicDoc` 级别验证含 `id-token: write` 引号列表项的 frontmatter。
+- 修复蒸馏批处理活锁（真机实测：每 5 轮精确触发、模型真实执行，但积压 200+ 时单批 40 条观察的 ops 输出超蒸馏模型输出上限，run 失败零 mark → 永远重试同一批判）。runInner 改为有界批循环：
+  - 自适应批大小：输出上限失败（finish `max-tokens`/`length`，抛点盖 code 戳 `MAX_TOKENS`）自动减半批次重试（下限 5），同一 run 内即完成「40 败 → 20 成」逃逸，失败批次不再永远占住队头；缩小状态跨 run 保持，配置变更或插件重载才复位（无投机自增，避免每 run 重付一次失败调用）。新配置 `distillBatchSize`（默认 40）。
+  - 单 run 模型调用预算：新配置 `distillMaxModelCalls`（默认 3），每次调用（含失败重试）都计数；预算耗尽即停，已成功批次照常 markDistilled，distill state 记 `partial: 已蒸馏标记 N 条观察（K 次模型调用）；…`——部分前进优于零前进。
+  - 零消费停机：某批 ops 未消费该批任何观察（head 无法前进，重跑只会重复）即停本轮；`no-ops` / 非 max-tokens 失败同样终止本轮，`no-observations` / `no-ops` / `model-error` / `invalid-output` 语义不变。
 
 - 适配 dsh 宿主 0.1.2-alpha.3，放弃 rc 线兼容（peer 要求 `dsh-llm`/`dsh-tools`/`dsh-settings`/`dsh-commands`/`dsh-util-values` >= 0.1.2-alpha.3；`cordis` ^4.0.2、`schemastery` ^3.18.2；devDeps 精确钉 alpha.3 闭包）：
   - settings 命名空间改字面量 `'llmwiki'`（dsh-settings 0.1.2-alpha.3 删除了模块级 `settingsNamespace()`，注册改类型级品牌校验）；运行时不再 require dsh-settings。
