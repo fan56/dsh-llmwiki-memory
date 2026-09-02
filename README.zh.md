@@ -92,7 +92,7 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 ## 已知边界
 
 - **子代理默认参与记忆，可整体关掉**：默认（`include-subagents` 开）注入与观察同样作用于子代理会话。`/wiki set include-subagents off` 后，delegation depth > 0 的子代理会话被整体跳过——不注入、不观察、不触发蒸馏；topic 工具始终在全局层（子代理显式 `topic_save` 不受开关影响）。跨进程子代理（claude-code/codex 等 provider）本就不加载本插件。
-- **headless 单发会话里的 session-end 蒸馏**：蒸馏 lane 在 turn/end 触发后异步执行，而 headless 进程答完即退，真实模型调用（秒级）大概率输给进程退出。多轮长会话（tui/web）里每 N 轮的蒸馏不受影响；`meta/distill-state.json` 记录每次 lane 的结局，`/wiki status` 可查。
+- **headless 单发会话里的 session-end 蒸馏**：插件 disposer 现在会等待退出触发的末次蒸馏落盘（有界等待，上限 90s；挂死的模型调用在超时后放弃、退出照常进行），headless 进程默认不再输掉这场竞速。会话内 `/wiki distill` 手动触发则完全绕开竞速；`meta/distill-state.json` 记录每次 lane 的结局，`/wiki status` 可查。
 - **配置读取时机**：`/wiki set` 与 settings.yaml 修改在下次会话启动后生效最稳。
 - **蒸馏选模型**：`/wiki onboard` 的蒸馏一步拆成两问（先 provider 后 model，模型列表取自该 provider 的目录），选完经 `resolveModelInfo` 预校验——provider 无活路由会阻断重选，模型目录校验非 NO_ADAPTER 失败（目录外，可能仍可用）则警告但放行；无 ask UI 或无可用模型路由的环境自动退回文本输入。`/wiki set` 的选择面板走同一套校验。
 

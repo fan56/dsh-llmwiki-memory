@@ -2,6 +2,10 @@
 
 ## 未发布
 
+- 吞吐：`distillMaxModelCalls` 默认 3 → 8。预算 3 次时每个 run 只消化 9–14 条观察，清 300 条积压要 20+ 个 run；批循环之下 8 次一轮可消化约 30–40 条（清积压场景的默认值，显式配置不受影响）。
+- 观察 GC：被装入批次喂给模型但未被任何 op 消费的观察记一次 failed attempt（`attempts` 计数，store 层 `recordUnconsumed`，与 markDistilled 同一持久化队列），连续 3 次（`OBSERVATION_MAX_ATTEMPTS`）即物理删除（用户已授权删除 lane 明确无法处理的观察数据）。删除数写入 distill-state detail（`gc: dropped N unprocessable observation(s)`）、state 文件 `gcDropped` 字段与 run 结果；删除发生时立即 commit（数据销毁必须 git 可追溯），纯计数沿用 flush 节奏。被消费的观察经 markDistilled 自然退出候选池、不参与计数。
+- 会话退出赛跑：插件 disposer 现在等待退出触发的末次蒸馏落盘后再返回——有界等待，上限 90s（挂死的模型调用不会拖住宿主退出；cordis 卸载会 await async disposer）。此前 fire-and-forget 使该路径基本无效：进程退出必然赢下竞速，state 与 marks 常常来不及写。README 已知边界同步更新。
+- 新命令 `/wiki distill`：手动触发一次蒸馏 run——复用现有 lane、in-flight 守卫与触发时 llm 捕获（命令所在会话的 agent 作用域实例优先）。输出摘要与 distill state 字段一一对应（标记 N 条 / 新建 X / 更新 Y / GC 回收 Z / reason / detail）；观察池为空直接提示 no-observations、不空跑 lane；未接线、模型未配置、已有 run 在跑均给可读原因。
 - 修复蒸馏 100% 失败（NO_ADAPTER 写进 distill-state）的三个根因之一——lane 在无适配器的实例上执行：
   - 触发时按会话捕获真正的 llm 实例（会话事件、`agent/inbox/spliced`、`agent/disposed` payload 在作用域解绑前），按 `sessionId` 传入 lane，并发会话不再互相覆盖。
   - `pickLiveLlm` 预检收紧为「必须探测到匹配路由」：无 `listProviders` 的实例不再被信任（无法证明适配器在场），探测失败仍给可读中文错误（无路由 / 无实例两种场景）。
