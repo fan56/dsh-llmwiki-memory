@@ -48,7 +48,7 @@ export interface DistillResult {
   detail?: string
 }
 
-const SYSTEM_PROMPT = [
+export const SYSTEM_PROMPT = [
   '你是 topic 记忆库的蒸馏引擎。输入是若干条未蒸馏的会话观察（JSON）和现有 topic 索引。',
   '任务：把观察沉淀成 Topic 操作。只输出一个 JSON 对象，不要任何其他文字、Markdown 代码块或解释。',
   '输出格式：{"ops": [...]}，每个元素：',
@@ -57,9 +57,10 @@ const SYSTEM_PROMPT = [
   '   "observed_ids":["obs-..."]}',
   '  {"op":"update","slug":"已有slug","conclusion":"修订后的完整结论","open_questions":[...],"observed_ids":["obs-..."]}',
   '规则：',
+  '- 硬性要求：每个 op 必须带 observed_ids 字段，值只能从本次输入「未蒸馏观察」里列出的 id 中逐字复制（形如 "obs-..."）；create 填它所综合依据的观察 id，update 填促使本次修订的观察 id。observed_ids 缺失、为空或含列表之外 id 的 op 一律无效，会被整体丢弃。',
   '- conclusion 必须自含（不依赖观察原文也能读懂），写「目前有效的结论」，不是流水账。',
   '- 同一主题只允许一个 create；已有相近 topic 时用 update 修订它的 conclusion。',
-  '- 观察里有价值就沉淀，没价值就跳过该观察；observed_ids 只列你实际消费的观察。',
+  '- 观察里有价值就沉淀，没价值就跳过该观察（被跳过观察的 id 不要出现在任何 op 里）；没有可沉淀内容时输出 {"ops":[]}。',
   '- 中文主题用中文写；tags 全小写。',
 ].join('\n')
 
@@ -82,6 +83,10 @@ interface BatchOutcome {
   created: string[]
   updated: string[]
   marked: number
+  /** Model calls this batch spent (1, or 2 when the corrective retry fired). */
+  callsUsed?: number
+  /** observed_ids entries dropped for not matching the batch's true id set. */
+  filteredIds?: number
   /** Model returned valid JSON with an empty ops array. */
   noOps?: boolean
   /** Model call died on the output-token limit (retryable with a smaller batch). */
@@ -89,6 +94,27 @@ interface BatchOutcome {
   /** Non-retryable call failure classification (parse or stream error). */
   fatalReason?: 'model-error' | 'invalid-output'
   detail?: string
+  /**
+   * Specific zero-consumption explanation for the stalled stop (undefined =
+   * fall back to the generic slug hint).
+   */
+  stallDetail?: string
+}
+
+/** Outcome of executing (a sanitized subset of) one batch's ops. */
+interface AppliedOps {
+  created: string[]
+  updated: string[]
+  /** Batch-valid observation ids consumed by executed ops. */
+  consumedIds: string[]
+  consumedSlugs: string[]
+  /** observed_ids entries dropped for not matching the batch's id set. */
+  filteredIds: number
+  /**
+   * Structurally valid ops held back entirely because none of their
+   * observed_ids matched the batch — the corrective-retry trigger.
+   */
+  droppedForIds: number
 }
 
 export class Distiller {
@@ -186,6 +212,8 @@ export class Distiller {
     let failureReason: 'model-error' | 'invalid-output' | undefined
     let failureDetail: string | undefined
     let firstFetch = true
+    let filteredTotal = 0
+    let stallDetail: string | undefined
     for (;;) {
       const observations = await this.service.store.undistilledObservations(this.batchSize)
       if (observations.length === 0) {
@@ -199,8 +227,11 @@ export class Distiller {
         stopped = 'budget'
         break
       }
-      calls += 1
-      const outcome = await this.runBatch(sessionId, observations)
+      // The batch spends 1 call, or 2 when the corrective observed_ids retry
+      // fires — the budget check above already guaranteed room for both.
+      const outcome = await this.runBatch(sessionId, observations, maxCalls - calls)
+      calls += Math.max(1, outcome.callsUsed ?? 1)
+      filteredTotal += outcome.filteredIds ?? 0
       created.push(...outcome.created)
       updated.push(...outcome.updated)
       marked += outcome.marked
@@ -233,6 +264,7 @@ export class Distiller {
         // head cannot advance, so re-calling would only repeat (or duplicate
         // topics). Stop and surface what already landed.
         stopped = 'stalled'
+        stallDetail = outcome.stallDetail
         break
       }
     }
@@ -246,12 +278,14 @@ export class Distiller {
         created: [],
         updated: [],
         marked: 0,
-        // A stalled run must never land as an unexplained failure: name the
-        // likely cause (ops referencing slugs that do not exist) so the
-        // distill-state stays actionable.
+        // A stalled run must never land as an unexplained failure: the batch
+        // names its own zero-consumption cause when it can (invalid
+        // observed_ids), otherwise the generic slug hint stands.
         detail:
           failureDetail ??
-          (stopped === 'stalled' ? '批次 ops 未消费任何观察（常见原因：ops 引用了不存在的 topic slug）' : undefined),
+          (stopped === 'stalled'
+            ? stallDetail ?? '批次 ops 未消费任何观察（常见原因：ops 引用了不存在的 topic slug）'
+            : undefined),
       }
     }
     const head =
@@ -264,19 +298,35 @@ export class Distiller {
             : stopped === 'no-ops'
               ? '后续批次模型未产出 ops，本轮停止'
               : stopped === 'stalled'
-                ? '后续批次未消费任何观察（继续只会重复），本轮停止'
+                ? `后续批次未消费任何观察，本轮停止${stallDetail !== undefined ? `：${stallDetail}` : ''}`
                 : undefined
+    const filteredNote = filteredTotal > 0 ? `；filtered ${filteredTotal} invalid observed_ids` : ''
+    const base = head === undefined ? undefined : `partial: 已蒸馏标记 ${marked} 条观察（${calls} 次模型调用）；${head}`
     return {
       ok: true,
       created,
       updated,
       marked,
-      detail: head === undefined ? undefined : `partial: 已蒸馏标记 ${marked} 条观察（${calls} 次模型调用）；${head}`,
+      detail:
+        base === undefined
+          ? filteredNote === ''
+            ? undefined
+            : filteredNote.replace(/^；/, '')
+          : `${base}${filteredNote}`,
     }
   }
 
-  /** One model call over one batch: payload build → ops → topic writes → marks. */
-  private async runBatch(sessionId: string | undefined, observations: readonly ObservationLike[]): Promise<BatchOutcome> {
+  /**
+   * One model call (plus at most one corrective retry) over one batch:
+   * payload build → ops → topic writes → marks. `budgetLeft` is the calls
+   * still available to the run including this batch's first call (≥ 1); the
+   * corrective retry only fires when it can stay inside that budget.
+   */
+  private async runBatch(
+    sessionId: string | undefined,
+    observations: readonly ObservationLike[],
+    budgetLeft: number,
+  ): Promise<BatchOutcome> {
     const metas = await this.service.store.listTopics()
     // Real open questions need the docs; fetch for index (bounded).
     const indexDetailed = []
@@ -329,14 +379,132 @@ export class Distiller {
       }
     }
     if (ops.length === 0) {
-      return { created: [], updated: [], marked: 0, noOps: true }
+      return { created: [], updated: [], marked: 0, noOps: true, callsUsed: 1 }
     }
-    const created: string[] = []
-    const updated: string[] = []
-    const consumedIds: string[] = []
-    const consumedSlugs: string[] = []
+    // observed_ids are the ONLY bridge between ops and marks — without a valid
+    // id the store cannot mark anything and the batch head can never advance
+    // (the real-machine zero-consumption livelock: topics landed, backlog
+    // never moved). Sanitize against the batch's TRUE id set BEFORE executing:
+    // an op whose ids all miss the batch is unattributable and gets held back,
+    // because executing it anyway would duplicate the topic when the
+    // corrective retry re-emits it with fixed ids.
+    const validIds = new Set(observations.map((o) => o.id))
+    const idList = observations.map((o) => o.id)
+    let applied = await this.applyOps(ops, validIds)
+    let callsUsed = 1
+    if (applied.consumedIds.length === 0 && applied.droppedForIds > 0) {
+      if (budgetLeft < 2) {
+        // No free lane: the retry must fit the same run budget.
+        return {
+          created: [],
+          updated: [],
+          marked: 0,
+          callsUsed,
+          filteredIds: applied.filteredIds,
+          stallDetail: `ops 未包含有效 observed_ids（已过滤 ${applied.filteredIds} 个无效 id），且模型调用预算不足以纠错重试（剩余 ${budgetLeft - 1} 次）`,
+        }
+      }
+      const pass1 = applied
+      const { applied: pass2, why } = await this.correctiveRetry(sessionId, user, idList, validIds)
+      callsUsed = 2
+      if (pass2 === undefined || pass2.consumedIds.length === 0) {
+        const tail =
+          pass2 === undefined
+            ? `纠错重试未产出可消费的 ops（${why}）`
+            : `纠错重试后 ops 仍未包含有效 observed_ids（累计过滤 ${pass1.filteredIds + pass2.filteredIds} 个无效 id）`
+        return {
+          created: [...pass1.created, ...pass2?.created ?? []],
+          updated: [...pass1.updated, ...pass2?.updated ?? []],
+          marked: 0,
+          callsUsed,
+          filteredIds: pass1.filteredIds + (pass2?.filteredIds ?? 0),
+          stallDetail: `${tail}；本批 ${observations.length} 条观察零消费`,
+        }
+      }
+      applied = {
+        created: [...pass1.created, ...pass2.created],
+        updated: [...pass1.updated, ...pass2.updated],
+        consumedIds: pass2.consumedIds,
+        consumedSlugs: pass2.consumedSlugs,
+        filteredIds: pass1.filteredIds + pass2.filteredIds,
+        droppedForIds: pass2.droppedForIds,
+      }
+    }
+    let marked = 0
+    if (applied.consumedIds.length > 0) {
+      marked = await this.service.store.markDistilled(applied.consumedIds, applied.consumedSlugs)
+    }
+    void this.service.sync?.schedulePush()
+    return { created: applied.created, updated: applied.updated, marked, callsUsed, filteredIds: applied.filteredIds }
+  }
+
+  /**
+   * The ONE corrective retry for a zero-valid-observed_ids batch: re-ask with
+   * the batch's legal id list spelled out verbatim. It spends a second call
+   * from the same run budget; any failure here resolves to
+   * `{ applied: undefined, why }` and the caller falls through to the stalled
+   * stop — a max-tokens correction does NOT trigger the batch halving (that
+   * escape hatch belongs to the main pass).
+   */
+  private async correctiveRetry(
+    sessionId: string | undefined,
+    originalUser: string,
+    idList: readonly string[],
+    validIds: ReadonlySet<string>,
+  ): Promise<{ applied?: AppliedOps; why: string }> {
+    const caller = this.caller
+    if (caller === undefined) return { why: 'distill caller unavailable' }
+    const user = [
+      originalUser,
+      '',
+      '---',
+      '纠错重试：你上一次返回的 ops 未包含任何有效的 observed_ids。',
+      `本批合法观察 id 列表（共 ${idList.length} 个，必须逐字复制，禁止改写、缩写或编造）：`,
+      JSON.stringify(idList),
+      '请重新输出完整蒸馏结果（严格 JSON，{"ops":[...]}）：每个 op 必须带 observed_ids，值只能从上面的列表逐字选取；create 填它所综合依据的观察 id，update 填促使本次修订的观察 id。没有可沉淀内容就输出 {"ops":[]}。',
+    ].join('\n')
+    let raw: string
+    try {
+      raw = await caller({ system: SYSTEM_PROMPT, user, purpose: 'llmwiki-distill', sessionId, maxTokens: 4000 })
+    } catch (e) {
+      return { why: `模型调用失败：${String(e instanceof Error ? e.message : e).slice(0, 160)}` }
+    }
+    let retried: DistillOp[]
+    try {
+      retried = parseOps(raw)
+    } catch (e) {
+      return { why: `输出无法解析：${String(e instanceof Error ? e.message : e).slice(0, 160)}` }
+    }
+    if (retried.length === 0) return { why: '模型返回空 ops' }
+    return { applied: await this.applyOps(retried, validIds), why: '' }
+  }
+
+  /**
+   * Execute a batch's ops with observed_ids sanitized upfront. An op whose
+   * sanitized id set is empty is held back entirely (droppedForIds): an
+   * unattributable topic write is one the marks can never account for, and
+   * the stalled stop would leave it duplicated on the next run. Structural
+   * failures (missing fields, unknown update slug) keep the per-op try/catch
+   * isolation — one bad op never sinks the batch, and a stall they cause is
+   * NOT attributed to observed_ids (no corrective retry for those).
+   */
+  private async applyOps(ops: readonly DistillOp[], validIds: ReadonlySet<string>): Promise<AppliedOps> {
+    const applied: AppliedOps = {
+      created: [],
+      updated: [],
+      consumedIds: [],
+      consumedSlugs: [],
+      filteredIds: 0,
+      droppedForIds: 0,
+    }
     for (const op of ops) {
       try {
+        const ids = (op.observed_ids ?? []).filter((id) => validIds.has(id))
+        applied.filteredIds += Math.max(0, (op.observed_ids?.length ?? 0) - ids.length)
+        if (ids.length === 0) {
+          applied.droppedForIds += 1
+          continue
+        }
         if (op.op === 'create' && typeof op.title === 'string' && typeof op.conclusion === 'string') {
           const res = await this.service.saveTopic({
             title: op.title,
@@ -350,8 +518,8 @@ export class Distiller {
             status: op.status === 'stable' ? 'stable' : 'draft',
             source: 'distill',
           })
-          created.push(res.slug)
-          consumedSlugs.push(res.slug)
+          applied.created.push(res.slug)
+          applied.consumedSlugs.push(res.slug)
         } else if (op.op === 'update' && typeof op.slug === 'string') {
           const existing = await this.service.store.readTopic(op.slug)
           if (existing === undefined) continue
@@ -363,22 +531,17 @@ export class Distiller {
             slug: op.slug,
             source: 'distill',
           })
-          updated.push(res.slug)
-          consumedSlugs.push(res.slug)
+          applied.updated.push(res.slug)
+          applied.consumedSlugs.push(res.slug)
         } else {
           continue
         }
-        for (const id of op.observed_ids ?? []) consumedIds.push(id)
+        applied.consumedIds.push(...ids)
       } catch {
         // One bad op must not sink the batch; unconsumed observations stay pending.
       }
     }
-    let marked = 0
-    if (consumedIds.length > 0) {
-      marked = await this.service.store.markDistilled(consumedIds, consumedSlugs)
-    }
-    void this.service.sync?.schedulePush()
-    return { created, updated, marked }
+    return applied
   }
 }
 
