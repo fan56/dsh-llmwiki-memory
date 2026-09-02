@@ -163,6 +163,9 @@ export function apply(ctx: Context): void {
   // The distill caller probes each candidate's live route table and, as the
   // last line of defense, turns a NO_ADAPTER stream failure into a readable
   // detail instead of the raw error (distill.ts defaultModelCaller).
+  // sessionLlm entries are dropped the moment the run they feed settles (and
+  // at teardown when no run is pending) — the map never holds a session's
+  // scope alive past its final distill (concern-1: long-running host leak).
   const llmRef: { scoped?: LlmCandidateShape; root?: LlmCandidateShape } = {}
   const sessionLlm = new Map<string, LlmCandidateShape>()
   const captureSessionLlm = (sessionId: string, candidate: unknown): void => {
@@ -196,7 +199,19 @@ export function apply(ctx: Context): void {
     } catch {
       // contained — the captured instance, if any, still walks the chain
     }
-    distiller.request(sessionId, reason)
+    // sessionLlm entries exist only to feed in-flight runs (the caller reads
+    // them lazily inside runInner): once the run settles no later read can
+    // need the entry. Release on settle, unless a newer run is already
+    // in-flight for the session — that run's trigger re-captured the entry
+    // and its own settle hook does the release.
+    const run = distiller.request(sessionId, reason)
+    if (run !== undefined) {
+      void run
+        .finally(() => {
+          if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
+        })
+        .catch(() => undefined)
+    }
   })
 
   // ---- Session events: injection + observation ----
@@ -299,6 +314,11 @@ export function apply(ctx: Context): void {
       captureFromAgent((subject as { agent?: unknown }).agent)
       observer.onSessionEvent(sessionId, name, undefined)
       injectedBySession.delete(sessionId)
+      // A teardown-triggered run (session-end distill) reads the payload
+      // capture lazily: drop the entry here only when no run can still read
+      // it. A pending run removes it on settle; a session that ends without
+      // any run must not leak its capture (long-running host process).
+      if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
     }) as never)
   }
 

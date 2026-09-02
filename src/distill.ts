@@ -77,13 +77,24 @@ export class Distiller {
     return this.caller !== undefined
   }
 
-  /** Fire-and-forget from the observer; dedups concurrent runs per session. */
-  request(sessionId: string, reason: 'every-n' | 'session-end'): void {
-    if (!this.configured) return
-    if (this.inFlight.has(sessionId)) return
+  /**
+   * Fire-and-forget from the observer; dedups concurrent runs per session.
+   * Returns the run promise (undefined when deduped or unconfigured) so the
+   * caller can hook post-run cleanup — the per-session llm capture in
+   * index.ts must live exactly as long as a run that may read it.
+   */
+  request(sessionId: string, reason: 'every-n' | 'session-end'): Promise<DistillResult> | undefined {
+    if (!this.configured) return undefined
+    if (this.inFlight.has(sessionId)) return undefined
     const run = this.run(sessionId).finally(() => this.inFlight.delete(sessionId))
     this.inFlight.set(sessionId, run)
     void run.catch(() => undefined)
+    return run
+  }
+
+  /** True while a run for the session is still in flight (teardown guard). */
+  hasPending(sessionId: string): boolean {
+    return this.inFlight.has(sessionId)
   }
 
   async run(sessionId?: string): Promise<DistillResult> {

@@ -8,6 +8,7 @@
   - 兜底防线：stream 阶段逃逸的 `NO_ADAPTER`（code 或 message）重抛为可读的双语失败（点名路由与原因），distill-state 不再落裸 `no adapter registered for provider`。
 - 修复会话结束触发是死分支：`agent/disposed` 不在 dsh-session 0.1.2-alpha.4 的 `SessionEventMap` 事件全集里，原先挂在 `session/event` 上的 `event.type === 'agent/disposed'` 分支永远不会 fire；`session/end-seed` 只在 restore/resume 时发，被误当「会话结束」。改为订阅真实销毁事件（cordis 独立事件）：`agent/disposed`（payload `{agent}`，AgentRegistry 解绑时发）与 `session/disposed`（payload Session，store detach 时发）都接入 observer 的结束触发（单发去重，两个事件先后到达不重复触发）；`session/end-seed` 回归「恢复边界」语义（重置结束标记，不再触发蒸馏）。注入去重注册表改由真实销毁事件清除。
 - 默认 `distillEveryTurns` 20 → 5（实测会话最长 8 轮，旧的每 20 轮 cadence 从未触发；会话结束触发修复后，5 轮给普通会话至少一次会话内蒸馏机会）。
+- 修复会话级 llm 捕获的慢性泄漏（常驻宿主进程下 `sessionLlm` 每会话净增一份强引用）：蒸馏 run 结算即释放对应条目，teardown（`agent/disposed` / `session/disposed`）时无 in-flight run 也即时删除；两处删除均带 pending 守卫——不会误删 session-end 蒸馏要用的 payload 捕获，也不会误删本 run 结算窗口内下一轮重新捕获的新条目。
 - 修复 YAML round-trip 损坏（生产 3 个 topic 文件各坏 1 行）：块列表项在判定 inline-map 前先做引号感知——成对单/双引号包裹的项视为 quoted 标量并剥离引号，不再被 `- "…: …"` 里的 `: ` 误判成 map；未闭合引号与原有无引号 `- key: value` map 语义不变。补单测覆盖 quoted/round-trip、unquoted-map、未闭合引号容错、全角冒号，以及 `okf.parseTopicDoc` 级别验证含 `id-token: write` 引号列表项的 frontmatter。
 
 - 适配 dsh 宿主 0.1.2-alpha.3，放弃 rc 线兼容（peer 要求 `dsh-llm`/`dsh-tools`/`dsh-settings`/`dsh-commands`/`dsh-util-values` >= 0.1.2-alpha.3；`cordis` ^4.0.2、`schemastery` ^3.18.2；devDeps 精确钉 alpha.3 闭包）：

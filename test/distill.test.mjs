@@ -196,6 +196,30 @@ test('distiller: single-flight per session dedups concurrent runs', async () => 
   }
 })
 
+test('distiller: request exposes the run; hasPending guards teardown cleanup', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await h.store.appendObservation({ kind: 'turn', source: 'auto', text: 'x' })
+    const d = new Distiller(h.service, async () => {
+      await new Promise((r) => setTimeout(r, 30))
+      return '{"ops":[]}'
+    })
+    const run = d.request('s1', 'every-n')
+    assert.ok(run instanceof Promise, 'request returns the run promise')
+    assert.equal(d.hasPending('s1'), true, 'in-flight run is visible to the teardown guard')
+    assert.equal(d.request('s1', 'session-end'), undefined, 'concurrent request is deduped (no run)')
+    await run
+    assert.equal(d.hasPending('s1'), false, 'guard clears once the run settles')
+    // Unconfigured distiller: no run, never pending.
+    const d2 = new Distiller(h.service, undefined)
+    assert.equal(d2.request('s1', 'every-n'), undefined)
+    assert.equal(d2.hasPending('s1'), false)
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('distiller: skipped observations stay pending', async () => {
   const h = make()
   try {
