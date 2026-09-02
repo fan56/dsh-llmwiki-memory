@@ -7,7 +7,7 @@ import { BundleStore } from '../lib/store.js'
 import { WikiService } from '../lib/service.js'
 import { Distiller, defaultModelCaller, parseOps, pickLiveLlm } from '../lib/distill.js'
 
-function make() {
+function make(cfgOverrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'llmwiki-distill-'))
   const store = new BundleStore(root)
   let cfg = {
@@ -15,6 +15,7 @@ function make() {
     matchThreshold: 0.3, tagBoost: 0.15, graphDepth: 2, recencyWindowDays: 7,
     autoObserve: true, observationMaxChars: 2000, distillEveryTurns: 20,
     distillOnSessionEnd: true, distillProvider: '', distillModel: '', pushDebounceSeconds: 45,
+    ...cfgOverrides,
   }
   const service = new WikiService(store, () => cfg)
   const cleanup = () => rmSync(root, { recursive: true, force: true })
@@ -374,4 +375,151 @@ test('defaultModelCaller: finish bare-string shapes stay tolerated (defensive, n
   const make = (reason) => defaultModelCaller(() => [finishLlm(reason)], () => ({ provider: 'p', model: 'm' }))
   assert.equal(await make('stop')(req), 'hi', 'bare "stop" resolves')
   await assert.rejects(() => make('rate-limited')(req), /model finish: rate-limited/)
+})
+
+// ---- Batch livelock fix: adaptive batch size + per-run call budget ----
+
+/** Append n observations; returns their ids in append order. */
+async function appendObs(store, n) {
+  const ids = []
+  for (let i = 0; i < n; i += 1) {
+    const o = await store.appendObservation({ kind: 'turn', source: 'auto', text: `批量观察 ${i}` })
+    ids.push(o.id)
+  }
+  return ids
+}
+
+/** Observation ids embedded in a distill prompt payload. */
+const idsIn = (user) => [...user.matchAll(/"id":"(obs-[^"]+)"/g)].map((m) => m[1])
+
+/** Valid ops JSON consuming exactly the given ids, one create per id. */
+const consumeOps = (ids) =>
+  JSON.stringify({ ops: ids.map((id) => ({ op: 'create', title: `T ${id}`, conclusion: `结论 ${id}`, observed_ids: [id] })) })
+
+test('distiller: max-tokens halves the batch, retries, and the shrink persists across runs', async () => {
+  const h = make({ distillBatchSize: 8, distillMaxModelCalls: 3 })
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 9)
+    const sizes = []
+    let first = true
+    const d = new Distiller(h.service, async (req) => {
+      const ids = idsIn(req.user)
+      sizes.push(ids.length)
+      if (first) {
+        first = false
+        // Message-regex path (no code stamp): the raw gateway finish text.
+        throw new Error('model finish: max-tokens')
+      }
+      return consumeOps(ids)
+    })
+    const r = await d.run('s1')
+    assert.equal(r.ok, true)
+    assert.deepEqual(sizes, [8, 5, 4], '8 overflows → halved to the 5 floor → drained the 4 remaining')
+    assert.equal(r.marked, 9)
+    assert.equal((await h.store.undistilledObservations()).length, 0)
+    // The shrink persists: config still says 8, but the lane stays at 5, so a
+    // fresh 10-observation pool is fetched 5-at-a-time, not 8.
+    await appendObs(h.store, 10)
+    const r2 = await d.run('s1')
+    assert.equal(r2.ok, true)
+    assert.equal(sizes[3], 5, 'run 2 starts at the shrunk size, not the configured batch size')
+    assert.equal(r2.marked, 10)
+    assert.deepEqual(sizes, [8, 5, 4, 5, 5])
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: per-run call budget stops with partial progress kept', async () => {
+  const h = make({ distillBatchSize: 3, distillMaxModelCalls: 2 })
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 10)
+    const d = new Distiller(h.service, async (req) => consumeOps(idsIn(req.user)))
+    const r = await d.run('s1')
+    assert.equal(r.ok, true)
+    assert.equal(r.marked, 6)
+    assert.match(r.detail ?? '', /partial/)
+    assert.match(r.detail ?? '', /2\/2/)
+    assert.equal((await h.store.undistilledObservations()).length, 4)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: output-limit at the batch floor stops without burning the budget', async () => {
+  const h = make({ distillBatchSize: 5, distillMaxModelCalls: 3 })
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 5)
+    let calls = 0
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      // Code-stamp path: how defaultModelCaller surfaces the finish branch.
+      throw Object.assign(new Error('model finish: max-tokens'), { code: 'MAX_TOKENS' })
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 1, 'halving cannot go below the floor — no pointless retries')
+    assert.equal(r.ok, false)
+    assert.equal(r.reason, 'model-error')
+    assert.match(r.detail ?? '', /无法再缩小/)
+    assert.equal((await h.store.undistilledObservations()).length, 5)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: distillBatchSize config bounds the per-call batch', async () => {
+  const h = make({ distillBatchSize: 7, distillMaxModelCalls: 1 })
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 10)
+    const seen = []
+    const d = new Distiller(h.service, async (req) => {
+      const ids = idsIn(req.user)
+      seen.push(ids.length)
+      return consumeOps(ids)
+    })
+    const r = await d.run('s1')
+    assert.deepEqual(seen, [7])
+    assert.equal(r.marked, 7)
+    assert.match(r.detail ?? '', /1\/1/)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: a batch that consumes nothing stops the run (no same-head repeat)', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    const ids = await appendObs(h.store, 3)
+    let calls = 0
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      return consumeOps([ids[0]]) // always "consumes" the first observation
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 2, 'second batch consumed nothing → stop, never a third same-head call')
+    assert.equal(r.ok, true)
+    assert.equal(r.marked, 1)
+    assert.equal((await h.store.undistilledObservations()).length, 2)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('defaultModelCaller: output-limit finishes are code-stamped MAX_TOKENS (retryable class)', async () => {
+  const req = { system: 's', user: 'u', purpose: 't', maxTokens: 10 }
+  for (const finish of [{ kind: 'max-tokens' }, { kind: 'length' }]) {
+    let err
+    try {
+      await defaultModelCaller(() => [finishLlm(finish)], () => ({ provider: 'p', model: 'm' }))(req)
+    } catch (e) {
+      err = e
+    }
+    assert.ok(err !== undefined, `${JSON.stringify(finish)} finish rejects`)
+    assert.equal(err.code, 'MAX_TOKENS', `${finish.kind} is classified as the smaller-batch-retryable failure`)
+  }
 })
