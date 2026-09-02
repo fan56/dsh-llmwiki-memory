@@ -29,12 +29,40 @@ import { Sync } from './sync.ts'
 import { buildTopicTools } from './tools.ts'
 import { buildWikiCommand } from './commands.ts'
 import { Observer, textOf, type UserMessageLike } from './observer.ts'
-import { Distiller, defaultModelCaller, type LlmCandidateShape } from './distill.ts'
+import { Distiller, defaultModelCaller, type DistillResult, type LlmCandidateShape } from './distill.ts'
 import { LlmwikiConfig, type LlmwikiConfigValue } from './config.ts'
 import type { AskServiceResolver, AskServiceShape, LlmDirectoryResolver, LlmDirectoryShape } from './onboard.ts'
 import { isDelegated } from './delegation.ts'
 
 export const name = 'dsh-llmwiki-memory'
+
+/**
+ * Bounded wait for the process-exit distill. Session teardown is the last
+ * distill trigger, but the disposer used to fire it fire-and-forget — process
+ * exit always won the race and the run died unwritten. The disposer now waits
+ * for the run, capped so a pathological (hanging) model call can never wedge
+ * the host's exit.
+ */
+export const EXIT_DISTILL_TIMEOUT_MS = 90_000
+
+/**
+ * Resolve when `p` settles (rejection swallowed) or after `ms`, whichever
+ * comes first. The cap timer is unref'd: an otherwise-idle event loop exits
+ * naturally instead of being kept alive purely by the bound.
+ */
+export function settleBounded(p: Promise<unknown> | undefined, ms: number): Promise<void> {
+  if (p === undefined) return Promise.resolve()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const cap = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms)
+    timer.unref?.()
+  })
+  const settled = p.then(
+    () => undefined,
+    () => undefined,
+  )
+  return Promise.race([settled, cap]).finally(() => clearTimeout(timer))
+}
 
 /** Services consumed at apply time; llm joins via guarded ctx.inject. */
 export const inject = ['systemPrompt', 'tools', 'settings', 'agents', 'llm']
@@ -191,6 +219,10 @@ export function apply(ctx: Context): void {
   const distiller = new Distiller(service, caller)
 
   // ---- Observer (M2) ----
+  // The process-exit disposer awaits this run (bounded): the callback below
+  // records it synchronously when the fake 'dispose' session's end trigger
+  // fires, so the disposer can wait for the last distill to land.
+  let exitDistill: Promise<DistillResult> | undefined
   const observer = new Observer(service, (sessionId, reason) => {
     // Trigger-time capture: the agent is still registered here, so its scoped
     // ctx can hand over the llm instance whose adapters are live.
@@ -206,6 +238,7 @@ export function apply(ctx: Context): void {
     // and its own settle hook does the release.
     const run = distiller.request(sessionId, reason)
     if (run !== undefined) {
+      if (sessionId === 'dispose') exitDistill = run
       void run
         .finally(() => {
           if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
@@ -335,10 +368,14 @@ export function apply(ctx: Context): void {
   ctx.effect(
     () => {
       void store.ensure().catch(() => undefined)
+      // Async disposer: cordis awaits it during unload (Disposable may be
+      // async), so the exit distill gets its bounded window before the
+      // process goes away instead of always losing the exit race.
       return () => {
         observer.onSessionEvent('dispose', 'agent/disposed', undefined)
         sync.dispose()
         void sync.commitMeta().then(() => sync.flush()).catch(() => undefined)
+        return settleBounded(exitDistill, EXIT_DISTILL_TIMEOUT_MS)
       }
     },
     'llmwiki: lifecycle',
@@ -390,7 +427,28 @@ export function apply(ctx: Context): void {
         root,
       ]
     }
-    cmdCtx.effect(() => commands.register(buildWikiCommand(service, mutate as never, resolveAsk, resolveLlm)), 'llmwiki: /wiki')
+    // Manual /wiki distill trigger: same lane, same in-flight guard, same
+    // trigger-time llm capture — the command runs inside a live session, so
+    // its agent's scoped instance is the freshest adapter holder.
+    const manualDistill = async (invocation: unknown): Promise<DistillResult> => {
+      try {
+        captureFromAgent((invocation as { agent?: unknown }).agent)
+      } catch {
+        // contained — the candidate chain still walks whatever was captured
+      }
+      const sessionId = String((invocation as { agent?: { id?: unknown } }).agent?.id ?? 'manual')
+      const run = distiller.request(sessionId, 'manual')
+      if (run === undefined) {
+        // request() only declines when unconfigured or already running.
+        return distiller.configured
+          ? { ok: false, reason: 'in-flight', created: [], updated: [], marked: 0 }
+          : { ok: false, reason: 'no-model', created: [], updated: [], marked: 0 }
+      }
+      return run.finally(() => {
+        if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
+      })
+    }
+    cmdCtx.effect(() => commands.register(buildWikiCommand(service, mutate as never, resolveAsk, resolveLlm, manualDistill)), 'llmwiki: /wiki')
   })
 }
 
@@ -414,6 +472,6 @@ const DEFAULTS: LlmwikiConfigValue = {
   distillProvider: '',
   distillModel: '',
   distillBatchSize: 40,
-  distillMaxModelCalls: 3,
+  distillMaxModelCalls: 8,
   pushDebounceSeconds: 45,
 }

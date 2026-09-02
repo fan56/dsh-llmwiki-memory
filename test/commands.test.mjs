@@ -525,3 +525,52 @@ test('tuningHint: dense near-miss band just below threshold suggests lowering', 
   const healthy = { ...stats, hitRate: 0.8, injectedRounds: 32 }
   assert.equal(tuningHint(healthy, 0.3), undefined)
 })
+
+test('command: /wiki distill — unwired, empty pool, success summary, failure reason', async () => {
+  const { service, mutate, store, cleanup } = makeService()
+  try {
+    await store.ensure()
+    // Unwired lane → readable error, not a crash.
+    const bare = buildWikiCommand(service, mutate)
+    const r0 = await bare.handler(inv('distill'))
+    assert.equal(r0.kind, 'error')
+    assert.match(r0.text, /未接线/)
+    // Empty pool → immediate no-observations hint; the lane is never invoked.
+    let laneCalls = 0
+    const lane = async () => {
+      laneCalls += 1
+      return { ok: false, reason: 'no-observations', created: [], updated: [], marked: 0 }
+    }
+    const cmd = buildWikiCommand(service, mutate, () => undefined, () => [], lane)
+    const r1 = await cmd.handler(inv('distill'))
+    assert.equal(r1.kind, 'success')
+    assert.match(r1.text, /观察池为空/)
+    assert.equal(laneCalls, 0, 'an empty pool answers without touching the lane')
+    // Populated pool → the summary mirrors the distill-state fields.
+    await store.appendObservation({ kind: 'finding', source: 'auto', text: 'x' })
+    const r2 = await buildWikiCommand(service, mutate, () => undefined, () => [], async () => ({
+      ok: true,
+      created: ['t1'],
+      updated: ['t2'],
+      marked: 3,
+      gcDropped: 1,
+      detail: 'partial: 已蒸馏标记 3 条观察（2 次模型调用）；…',
+    })).handler(inv('distill'))
+    assert.equal(r2.kind, 'success')
+    assert.match(r2.text, /标记 3 条观察/)
+    assert.match(r2.text, /新建 1 个 Topic/)
+    assert.match(r2.text, /更新 1 个 Topic/)
+    assert.match(r2.text, /GC 回收 1 条不可处理观察/)
+    assert.match(r2.text, /partial/)
+    // Lane failure → error result naming the reason.
+    const r3 = await buildWikiCommand(service, mutate, () => undefined, () => [], async () => ({
+      ok: false, reason: 'in-flight', created: [], updated: [], marked: 0,
+    })).handler(inv('distill'))
+    assert.equal(r3.kind, 'error')
+    assert.match(r3.text, /已有蒸馏在跑/)
+    // The action is discoverable.
+    assert.match(HELP, /\/wiki distill/)
+  } finally {
+    cleanup()
+  }
+})

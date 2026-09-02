@@ -11,6 +11,7 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { WikiService } from './service.ts'
+import type { DistillResult } from './distill.ts'
 import { serializeTopicDoc, slugify, firstParagraph } from './okf.ts'
 import { buildGraph, renderGraphHtml } from './viz.ts'
 import { CONFIG_KEYS, displayKey, type ConfigKey, type LlmwikiConfigValue, parseConfigValue } from './config.ts'
@@ -29,10 +30,18 @@ import {
   type MutateFn,
 } from './onboard.ts'
 
+/**
+ * Manual `/wiki distill` trigger, wired by the host (index.ts owns the lane
+ * instance). Returns the lane's own result shape; rejections surface through
+ * the command's normal error path.
+ */
+export type ManualDistill = (invocation: CommandInvocation) => Promise<DistillResult>
+
 export const HELP = [
   'dsh-llmwiki-memory — OKF topic 记忆（本地 bundle，git 可追溯，可选 GitHub 同步）',
   '  /wiki onboard             交互式配置向导（ask-user 面板逐项问答；无 UI 环境逐条输入）',
   '  /wiki status              bundle 健康：topic 数、观察积压、冲突、同步状态',
+  '  /wiki distill             手动触发一次蒸馏（观察池 → Topic，输出 marked/created/updated/gc 摘要）',
   '  /wiki stats               注入统计：hit rate、top-N、near-miss 分布与调参建议',
   '  /wiki list                列出全部 Topic',
   '  /wiki show <slug>         查看一个 Topic 全文（含反向引用）',
@@ -46,17 +55,17 @@ export const HELP = [
   '凭据：$GITHUB_TOKEN 或已登录的 gh CLI；登录不在本插件职责内。',
 ].join('\n')
 
-export function buildWikiCommand(service: WikiService, mutate: MutateFn, resolveAsk: AskServiceResolver = () => undefined, resolveLlm: LlmDirectoryResolver = () => []): CommandDefinition {
+export function buildWikiCommand(service: WikiService, mutate: MutateFn, resolveAsk: AskServiceResolver = () => undefined, resolveLlm: LlmDirectoryResolver = () => [], distillNow?: ManualDistill): CommandDefinition {
   const onboard = createOnboardHandler(service, mutate, undefined, resolveAsk, resolveLlm)
   return {
     name: 'wiki',
-    description: 'OKF topic 记忆：onboard | status | stats | list | show | history | graph | sync | config | set',
-    input: { hint: '[onboard | status | stats | list | show <slug> | history <slug> | graph | sync [pull|push] | config | set <key> <value>]' },
-    handler: (invocation) => handle(invocation, service, mutate, onboard, resolveAsk, resolveLlm),
+    description: 'OKF topic 记忆：onboard | distill | status | stats | list | show | history | graph | sync | config | set',
+    input: { hint: '[onboard | distill | status | stats | list | show <slug> | history <slug> | graph | sync [pull|push] | config | set <key> <value>]' },
+    handler: (invocation) => handle(invocation, service, mutate, onboard, resolveAsk, resolveLlm, distillNow),
   }
 }
 
-async function handle(invocation: CommandInvocation, service: WikiService, mutate: MutateFn, onboard: (args: string[], invocation: CommandInvocation) => Promise<CommandResult>, resolveAsk: AskServiceResolver, resolveLlm: LlmDirectoryResolver): Promise<CommandResult> {
+async function handle(invocation: CommandInvocation, service: WikiService, mutate: MutateFn, onboard: (args: string[], invocation: CommandInvocation) => Promise<CommandResult>, resolveAsk: AskServiceResolver, resolveLlm: LlmDirectoryResolver, distillNow?: ManualDistill): Promise<CommandResult> {
   const raw = invocation.rawInput.trim()
   const [action = '', ...rest] = raw.split(/\s+/)
   try {
@@ -67,6 +76,8 @@ async function handle(invocation: CommandInvocation, service: WikiService, mutat
         return await onboard(rest, invocation)
       case 'status':
         return ok(await renderStatus(service))
+      case 'distill':
+        return await doDistill(service, invocation, distillNow)
       case 'stats':
         return ok(await renderStats(service))
       case 'list':
@@ -120,6 +131,33 @@ async function renderStatus(service: WikiService): Promise<string> {
     if (service.sync.lastError !== '') lines.push(`  同步错误：${service.sync.lastError.split('\n').at(-1)}`)
   }
   return lines.join('\n')
+}
+
+/**
+ * `/wiki distill` — one manual distill run over the current observation pool.
+ * The empty-pool case answers immediately without touching the lane; the
+ * summary mirrors the distill state fields (ok / marked / created / updated /
+ * gc dropped / reason) so what the user sees is what the state file records.
+ */
+async function doDistill(service: WikiService, invocation: CommandInvocation, distillNow: ManualDistill | undefined): Promise<CommandResult> {
+  if (distillNow === undefined) return fail('蒸馏 lane 未接线（宿主未提供手动蒸馏触发器）')
+  const pending = await service.store.undistilledObservations(1)
+  if (pending.length === 0) return ok('观察池为空（no-observations）：没有未蒸馏的观察，无需触发。')
+  const result = await distillNow(invocation)
+  if (!result.ok) {
+    const reasonNote =
+      result.reason === 'no-observations'
+        ? '观察池为空（no-observations）'
+        : result.reason === 'no-model'
+          ? '蒸馏模型未配置（/wiki set distill-provider / distill-model）'
+          : result.reason === 'in-flight'
+            ? '已有蒸馏在跑，稍后再试'
+            : (result.reason ?? 'unknown')
+    return fail(`蒸馏未产出：${reasonNote}${result.detail !== undefined ? `\n   ${result.detail}` : ''}`)
+  }
+  const parts = [`标记 ${result.marked} 条观察`, `新建 ${result.created.length} 个 Topic`, `更新 ${result.updated.length} 个 Topic`]
+  if (result.gcDropped !== undefined && result.gcDropped > 0) parts.push(`GC 回收 ${result.gcDropped} 条不可处理观察`)
+  return ok(`✅ 蒸馏完成：${parts.join('；')}${result.detail !== undefined ? `\n   ${result.detail}` : ''}`)
 }
 
 async function renderStats(service: WikiService): Promise<string> {

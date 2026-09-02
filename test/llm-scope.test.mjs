@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply } from '../lib/index.js'
+import { apply, settleBounded, EXIT_DISTILL_TIMEOUT_MS } from '../lib/index.js'
 import { BundleStore } from '../lib/store.js'
 
 const CFG = {
@@ -47,6 +47,7 @@ function bootPlugin(overrides = {}) {
   const handlers = []
   const disposedHandlers = {}
   const contexts = []
+  const effects = []
   const agentsMap = new Map()
   const ctx = {
     settings: { register: () => ({ get: () => overrides }) },
@@ -58,7 +59,10 @@ function bootPlugin(overrides = {}) {
       else if (type === 'agent/disposed' || type === 'session/disposed') disposedHandlers[type] = handler
     },
     inject: (_deps, cb) => cb({ effect: () => () => {} }),
-    effect: () => () => {},
+    effect: (setup, name) => {
+      effects.push({ setup, name })
+      return () => {}
+    },
   }
   apply(ctx)
   const onEvent = handlers[0]
@@ -76,7 +80,7 @@ function bootPlugin(overrides = {}) {
     else process.env.DSH_LLMWIKI_HOME = prevHome
     rmSync(root, { recursive: true, force: true })
   }
-  return { root, agentsMap, dispatch, dispose, cleanup }
+  return { root, agentsMap, dispatch, dispose, effects, cleanup }
 }
 
 async function waitFor(cond, what, timeoutMs = 4000) {
@@ -164,6 +168,53 @@ test('sessionLlm: agent/disposed session-end run still feeds from the payload ca
     // Double teardown (session/disposed after agent/disposed) is a no-op:
     // single-fire observer trigger + idempotent deletion.
     h.dispose('s1', 'session/disposed')
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ---- exit lifecycle: the disposer waits (bounded) for the last distill ----
+
+test('settleBounded: resolves as soon as the run settles; rejections are swallowed', async () => {
+  const start = Date.now()
+  await settleBounded(new Promise((r) => setTimeout(r, 30)), 60_000)
+  assert.ok(Date.now() - start < 1000, 'a healthy run is awaited, not the cap')
+  await settleBounded(Promise.reject(new Error('boom')), 60_000)
+  assert.equal(EXIT_DISTILL_TIMEOUT_MS, 90_000, 'the documented exit cap')
+})
+
+test('settleBounded: caps a hanging run so exit never wedges', async () => {
+  const start = Date.now()
+  await settleBounded(new Promise(() => {}), 40)
+  const elapsed = Date.now() - start
+  assert.ok(elapsed >= 35 && elapsed < 5000, `the cap fired instead of the hang (elapsed=${elapsed}ms)`)
+})
+
+test('lifecycle: the effect disposer awaits the exit distill before resolving', async () => {
+  const h = bootPlugin({ ...CFG })
+  try {
+    const store = new BundleStore(h.root)
+    await store.ensure()
+    const o1 = await store.appendObservation({ kind: 'finding', source: 'auto', text: '观察一' })
+    const llm = liveLlm(opFor('Exit Distill Topic', o1.id))
+    const baseStream = llm.stream
+    llm.stream = async function* (...args) {
+      await new Promise((r) => setTimeout(r, 150)) // a realistic slow model call
+      yield* baseStream(...args)
+    }
+    // The exit path triggers under the fake 'dispose' session id — its agent
+    // entry is where the trigger-time llm capture finds the instance.
+    h.agentsMap.set('dispose', { id: 'dispose', inbox: { nextTurn: [], nextStep: [] }, ctx: { llm } })
+    const lifecycle = h.effects.find((e) => e.name === 'llmwiki: lifecycle')
+    assert.ok(lifecycle !== undefined, 'the lifecycle effect is registered')
+    const disposer = lifecycle.setup()
+    const start = Date.now()
+    await disposer()
+    const elapsed = Date.now() - start
+    assert.ok(elapsed >= 140, `the disposer waited for the distill (elapsed=${elapsed}ms)`)
+    assert.ok(elapsed < 30_000, 'and it did not wedge on the cap')
+    assert.equal((await store.readDistillState())?.ok, true, 'the exit distill landed before dispose resolved')
+    assert.equal((await store.undistilledObservations()).length, 0)
   } finally {
     h.cleanup()
   }
