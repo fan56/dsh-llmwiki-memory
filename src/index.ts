@@ -372,7 +372,15 @@ export function apply(ctx: Context): void {
       // async), so the exit distill gets its bounded window before the
       // process goes away instead of always losing the exit race.
       return () => {
-        observer.onSessionEvent('dispose', 'agent/disposed', undefined)
+        // A real session's session-end run (agent/disposed trigger, moments
+        // earlier) may still be in flight — and the fake-'dispose' run would
+        // feed the SAME global pool head to the model a second time (double
+        // evaluation, double GC attempts). Skip the exit trigger while any
+        // run is pending; the bounded wait below then simply has nothing
+        // extra to await.
+        if (!distiller.hasAnyPending()) {
+          observer.onSessionEvent('dispose', 'agent/disposed', undefined)
+        }
         sync.dispose()
         void sync.commitMeta().then(() => sync.flush()).catch(() => undefined)
         return settleBounded(exitDistill, EXIT_DISTILL_TIMEOUT_MS)
@@ -439,7 +447,11 @@ export function apply(ctx: Context): void {
       const sessionId = String((invocation as { agent?: { id?: unknown } }).agent?.id ?? 'manual')
       const run = distiller.request(sessionId, 'manual')
       if (run === undefined) {
-        // request() only declines when unconfigured or already running.
+        // request() only declines when unconfigured or already running. The
+        // capture above may have (re)armed the session's llm entry; with no
+        // run pending to consume-and-release it, drop it here — a declined
+        // request leaves no settle hook behind.
+        if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
         return distiller.configured
           ? { ok: false, reason: 'in-flight', created: [], updated: [], marked: 0 }
           : { ok: false, reason: 'no-model', created: [], updated: [], marked: 0 }

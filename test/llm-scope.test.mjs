@@ -219,3 +219,61 @@ test('lifecycle: the effect disposer awaits the exit distill before resolving', 
     h.cleanup()
   }
 })
+
+test('lifecycle: the exit dispose trigger is skipped while a session-end run is in flight', async () => {
+  const h = bootPlugin({ ...CFG })
+  try {
+    const store = new BundleStore(h.root)
+    await store.ensure()
+    const o1 = await store.appendObservation({ kind: 'finding', source: 'auto', text: '观察一' })
+    // The session-end run's model call is held open so the run is genuinely
+    // in flight when the disposer fires.
+    const llm = liveLlm(opFor('End Run Topic', o1.id))
+    const baseStream = llm.stream
+    let endCalls = 0
+    let release
+    const hang = new Promise((r) => {
+      release = r
+    })
+    llm.stream = async function* (...args) {
+      endCalls += 1
+      await hang
+      yield* baseStream(...args)
+    }
+    // A SECOND adapter-holding instance for the fake 'dispose' session: if
+    // the exit trigger ran anyway, it would capture THIS instance and feed
+    // the same global pool head to the model a second time.
+    const disposeLlm = liveLlm(opFor('Dispose Duplicate Topic', o1.id))
+    let disposeCalls = 0
+    const disposeBase = disposeLlm.stream
+    disposeLlm.stream = async function* (...args) {
+      disposeCalls += 1
+      yield* disposeBase(...args)
+    }
+    h.agentsMap.set('s1', { id: 's1', inbox: { nextTurn: [], nextStep: [] }, ctx: { llm } })
+    h.agentsMap.set('dispose', { id: 'dispose', inbox: { nextTurn: [], nextStep: [] }, ctx: { llm: disposeLlm } })
+
+    // Real teardown starts the session-end run; wait until it sits in the
+    // model call (inFlight was set synchronously at request()).
+    h.dispose('s1', 'agent/disposed')
+    await waitFor(() => endCalls === 1, 'the session-end run reached the (held) model call')
+
+    // Exit while it is in flight: the guard must skip the dispose trigger.
+    const lifecycle = h.effects.find((e) => e.name === 'llmwiki: lifecycle')
+    assert.ok(lifecycle !== undefined, 'the lifecycle effect is registered')
+    const disposer = lifecycle.setup()
+    const start = Date.now()
+    await disposer()
+    assert.ok(Date.now() - start < 5_000, 'nothing extra to await: the exit path resolved immediately')
+    assert.equal(disposeCalls, 0, 'the dispose run never started — no double feed of the same head batch')
+    assert.equal(endCalls, 1, 'exactly one model evaluation of the batch')
+
+    // Release the held call: the session-end run lands normally.
+    release()
+    await waitFor(async () => (await store.readDistillState())?.ok === true, 'the held session-end run lands after release')
+    assert.equal((await store.allObservations())[0].distilled, true, 'the observation was consumed exactly once')
+    assert.equal(await store.readTopic('end-run-topic') !== undefined, true, 'its topic landed')
+  } finally {
+    h.cleanup()
+  }
+})
