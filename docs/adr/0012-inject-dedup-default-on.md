@@ -10,7 +10,7 @@ Status: accepted
 
 - 新增 `injectDedup` 配置（`/wiki set inject-dedup <on|off>`，**默认开**）：会话级注册表记录「实际装箱进上下文」的 slug；检索命中先过 exclude 过滤再装配，被挡下的 slug 记入 `record.deduped`（`why: 'dedup'`）。
 - 只有真正进入上下文的 slug 才回写注册表（`included`）；被 total-budget 丢弃的不回写——它们从未到达模型，之后预算宽裕时仍应注入。
-- 注册表跨轮存活（`turn/start` 不清），仅 `session/end-seed` 与 `agent/disposed` 清零。
+- 注册表跨轮存活（`turn/start` 不清）；清零点为真实 teardown 的 cordis 事件 `agent/disposed` 与 `session/disposed`（两个均触发、删除幂等），以及 `session/end-seed`（resume 语义：重建会话重放持久化上下文，注册表不在场，允许重注）。
 - 检索形态指标保留原始 hits：`/wiki stats` 的平均命中、零命中轮、near-miss 分布描述的是「检索看到了什么」，不被去重扭曲；只有 Top-N 被注入计数排除被去重的 slug（ilog.ts）。
 
 ## Consequences
