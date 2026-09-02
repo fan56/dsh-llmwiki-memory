@@ -151,18 +151,35 @@ export function apply(ctx: Context): void {
   for (const tool of buildTopicTools(service)) tools.register(tool)
 
   // ---- Distill lane (M2) ----
-  // The llm service is SCOPED per agent: adapters (real or replay) register
-  // on the session-scoped instance, not the root one captured at apply time.
-  // During event dispatch the handler's `this` is the active scoped context —
-  // grab its llm there (while active; after teardown access throws). Candidate
-  // chain: session-scoped capture → apply-time root instance; the distill
-  // caller probes each cheaply (listProviders must contain the route) so a
-  // stale capture whose scope was torn down can't kill the run.
+  // The llm service instance that actually OWNS the provider adapters is
+  // reachable only while the agent/session scope that registered them is
+  // alive (dsh adapters register on the instance served to their own plugin
+  // ctx). Captures therefore happen at trigger time and keyed per session:
+  //   - sessionLlm: the triggering session's freshest capture (turn events,
+  //     agent/inbox/spliced, agent/disposed payload) — passed to the lane by
+  //     req.sessionId so concurrent sessions cannot clobber each other;
+  //   - llmRef.scoped: last session-wide capture (fallback);
+  //   - llmRef.root: apply-time instance (last resort).
+  // The distill caller probes each candidate's live route table and, as the
+  // last line of defense, turns a NO_ADAPTER stream failure into a readable
+  // detail instead of the raw error (distill.ts defaultModelCaller).
   const llmRef: { scoped?: LlmCandidateShape; root?: LlmCandidateShape } = {}
+  const sessionLlm = new Map<string, LlmCandidateShape>()
+  const captureSessionLlm = (sessionId: string, candidate: unknown): void => {
+    if (candidate === undefined || typeof (candidate as { stream?: unknown }).stream !== 'function') return
+    sessionLlm.set(sessionId, candidate as LlmCandidateShape)
+  }
+  const captureFromAgent = (agent: unknown): void => {
+    try {
+      captureSessionLlm(String((agent as { id?: unknown }).id ?? ''), (agent as { ctx?: Record<string, unknown> }).ctx?.llm)
+    } catch {
+      // scope already unwinding — the per-session capture stays absent
+    }
+  }
   llmRef.root = (ctx as unknown as Record<string, unknown>).llm as LlmCandidateShape | undefined
   void import('@deepseek-ai/dsh-llm').catch(() => undefined)
   const caller = defaultModelCaller(
-    () => [llmRef.scoped, llmRef.root],
+    (req) => [req?.sessionId === undefined ? undefined : sessionLlm.get(req.sessionId), llmRef.scoped, llmRef.root],
     () => {
       const c = cfgNow()
       return c.distillProvider !== '' && c.distillModel !== '' ? { provider: c.distillProvider, model: c.distillModel } : undefined
@@ -171,12 +188,22 @@ export function apply(ctx: Context): void {
   const distiller = new Distiller(service, caller)
 
   // ---- Observer (M2) ----
-  const observer = new Observer(service, (sessionId, reason) => distiller.request(sessionId, reason))
+  const observer = new Observer(service, (sessionId, reason) => {
+    // Trigger-time capture: the agent is still registered here, so its scoped
+    // ctx can hand over the llm instance whose adapters are live.
+    try {
+      captureFromAgent(agents()?.get(sessionId) as unknown)
+    } catch {
+      // contained — the captured instance, if any, still walks the chain
+    }
+    distiller.request(sessionId, reason)
+  })
 
   // ---- Session events: injection + observation ----
-  // Regular function on purpose: cordis binds `this` to the active scoped
-  // context during dispatch — the only moment the session-scoped llm service
-  // (with its adapters) is reachable for the distill lane's later use.
+  // Dispatch binds `this` to the event's scope carrier (dsh-session appends
+  // with `scopeTarget` carriers, dsh-agent with agent carriers) — a plain
+  // object without services, so `this.llm` is defensive only; the agent's
+  // scoped ctx (via agents()) is the real instance source.
   ctx.on(
     'session/event' as never,
     (function (this: unknown, session: { id: unknown }, event: SessionEvent) {
@@ -190,7 +217,10 @@ export function apply(ctx: Context): void {
         const candidate = (this as unknown as Record<string, unknown> | undefined)?.llm as
           | { stream(options: unknown): AsyncIterable<unknown> }
           | undefined
-        if (candidate !== undefined && typeof candidate.stream === 'function') llmRef.scoped = candidate
+        if (candidate !== undefined && typeof candidate.stream === 'function') {
+          llmRef.scoped = candidate
+          captureSessionLlm(sessionId, candidate)
+        }
       } catch {
         // this-binding absent on this host — the apply-time root fallback stays.
       }
@@ -206,7 +236,7 @@ export function apply(ctx: Context): void {
         const candidate = (agent as unknown as { ctx?: Record<string, unknown> }).ctx?.llm as
           | { stream(options: unknown): AsyncIterable<unknown> }
           | undefined
-        if (candidate !== undefined && typeof candidate.stream === 'function') llmRef.scoped = candidate
+        if (candidate !== undefined && typeof candidate.stream === 'function') captureSessionLlm(sessionId, candidate)
       } catch {
         // scope already unwinding — the root fallback stays
       }
@@ -262,6 +292,11 @@ export function apply(ctx: Context): void {
     ctx.on(name as never, ((subject: unknown) => {
       const sessionId = sessionIdOf(subject as never)
       if (sessionId === '') return
+      // The agent payload is still alive at unregistration time (scope unwind
+      // comes after), so this is where the freshest adapter-holding instance
+      // is captured for the final distillation — it may already be gone from
+      // agents().
+      captureFromAgent((subject as { agent?: unknown }).agent)
       observer.onSessionEvent(sessionId, name, undefined)
       injectedBySession.delete(sessionId)
     }) as never)
@@ -354,7 +389,7 @@ const DEFAULTS: LlmwikiConfigValue = {
   autoObserve: true,
   includeSubagents: true,
   observationMaxChars: 2000,
-  distillEveryTurns: 20,
+  distillEveryTurns: 5,
   distillOnSessionEnd: true,
   distillProvider: '',
   distillModel: '',

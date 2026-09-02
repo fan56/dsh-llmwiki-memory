@@ -269,11 +269,13 @@ export interface LlmCandidatePick {
  * candidates were cleanly probed along the way (the caller uses that to tell
  * 「有实例但不匹配」 apart from 「没有实例」). A disposed scope throws on
  * access — that instance is skipped, not fatal. An instance WITHOUT the probe
- * is accepted as-is: nothing to compare against.
+ * is accepted as-is unless `requireProbe` is set: it offers nothing to compare
+ * against, so an unprobable candidate can never vouch for the route.
  */
 export function pickLlmCandidate(
   candidates: readonly (LlmProbeShape | undefined)[],
   probe: (providers: readonly { id: string }[]) => boolean,
+  requireProbe = false,
 ): LlmCandidatePick {
   let probed = 0
   for (const candidate of candidates) {
@@ -283,6 +285,11 @@ export function pickLlmCandidate(
       if (providers !== undefined) {
         probed += 1
         if (!probe(providers)) continue
+      } else if (requireProbe) {
+        // An unprobeable instance cannot prove an adapter serves the route —
+        // skipping it is what lets the pre-flight fail with the readable
+        // message instead of letting a later stream() surface a raw NO_ADAPTER.
+        continue
       }
     } catch {
       continue // disposed scope: even touching the service throws
@@ -294,16 +301,22 @@ export function pickLlmCandidate(
 
 /**
  * Cheap pre-flight for the distill lane: walk the candidates in priority order
- * (session-scoped capture first, apply-time root second) and return the first
- * instance whose live route table contains `provider`. Fails BEFORE calling
- * stream, with the failure mode in the message: a reachable instance that
- * lacks the route (scope released by a teardown, or a typo'd provider) says
- * so; no reachable instance at all says that instead. The detail is readable
- * Chinese: a dead/legacy instance is skipped when it can be probed;
- * probe-less instances pass through and may still surface raw adapter errors.
+ * (per-session capture first, then the session-wide capture, apply-time root
+ * last) and return the only instance that honestly qualifies — one whose live
+ * `listProviders()` PROVES a registered adapter serves `provider`. On dsh-llm
+ * 0.1.2-alpha.4 `listProviders()` reads the same adapter registry `stream()`
+ * dispatches through (lib/index.js:1308 vs :1626), so a probed match is an
+ * adapter guarantee; candidates that cannot be probed are skipped, not
+ * trusted. Fails BEFORE calling stream, with the failure mode readable: a
+ * reachable instance that lacks the route (scope released by a teardown, or a
+ * typo'd provider) says so; no reachable instance at all says that instead.
  */
 export function pickLiveLlm(candidates: readonly (LlmCandidateShape | undefined)[], provider: string): LlmCandidateShape {
-  const { llm, probed } = pickLlmCandidate(candidates, (providers) => providers.some((p) => p.id === provider))
+  const { llm, probed } = pickLlmCandidate(
+    candidates,
+    (providers) => providers.some((p) => p.id === provider),
+    true,
+  )
   if (llm !== undefined) return llm as LlmCandidateShape
   if (probed > 0) {
     throw new Error(`distill-provider «${provider}» 没有匹配的模型路由（检查拼写或本机 provider 配置），等待下次会话启动重试`)
@@ -311,12 +324,25 @@ export function pickLiveLlm(candidates: readonly (LlmCandidateShape | undefined)
   throw new Error(`蒸馏模型路由 ${provider} 暂不可用：没有可用的模型服务实例（会话已结束或本机 llm 服务缺失）`)
 }
 
+/** True for the adapter-registry miss thrown by `llm.stream()` on a route nobody registered. */
+function isNoAdapter(error: unknown): boolean {
+  if (error === null || typeof error !== 'object') return false
+  if ((error as { code?: unknown }).code === 'NO_ADAPTER') return true
+  return typeof (error as { message?: unknown }).message === 'string' && /no adapter registered for provider/i.test((error as { message: string }).message)
+}
+
 /**
  * Default ModelCaller over the dsh LLM seam (`ctx.llm.stream` + BlockAssembler),
  * following dsh-session-title-llm's call policy. `getCandidates` supplies the
- * ordered instance candidates ([scoped, root] in production); the first one
- * whose live routes contain the configured provider wins. Returns undefined
- * until the llm service and a configured route both exist.
+ * ordered instance candidates — production passes the triggering session's
+ * captured instance first, then the session-wide capture and the apply-time
+ * root; the first one whose live routes prove the configured provider wins.
+ * Returns undefined until the llm service and a configured route both exist.
+ *
+ * Last-line guarantee: whatever host shape the candidates come from, a
+ * `NO_ADAPTER` miss inside `stream()` is never recorded raw — it is rethrown
+ * as a readable failure naming the route and the likely cause, so the
+ * distill-state detail stays actionable (CHANGELOG promise).
  *
  * dsh 0.1.2-alpha.3 seam shape: `GenerateOptions.purpose` is the closed union
  * `'compaction' | 'session-title'` — a distill call has no sanctioned value
@@ -326,13 +352,13 @@ export function pickLiveLlm(candidates: readonly (LlmCandidateShape | undefined)
  * so it stays unset too. `deepFreeze` moved to @deepseek-ai/dsh-util-values.
  */
 export function defaultModelCaller(
-  getCandidates: () => readonly (LlmCandidateShape | undefined)[],
+  getCandidates: (req?: ModelRequest) => readonly (LlmCandidateShape | undefined)[],
   getRoute: () => { provider: string; model: string } | undefined,
 ): ModelCaller | undefined {
   return async (req) => {
     const route = getRoute()
     if (route === undefined) throw new Error('distill route not configured (set distill-provider and distill-model)')
-    const llm = pickLiveLlm(getCandidates(), route.provider)
+    const llm = pickLiveLlm(getCandidates(req), route.provider)
     const { BlockAssembler, createUserMessage } = await import('@deepseek-ai/dsh-llm')
     const { deepFreeze } = await import('@deepseek-ai/dsh-util-values')
     const messages = [
@@ -350,8 +376,19 @@ export function defaultModelCaller(
       signal: req.signal,
     })
     const assembler = new BlockAssembler()
-    for await (const chunk of llm.stream(options)) {
-      ;(assembler as unknown as { push(c: unknown): void }).push(chunk)
+    try {
+      for await (const chunk of llm.stream(options)) {
+        ;(assembler as unknown as { push(c: unknown): void }).push(chunk)
+      }
+    } catch (e) {
+      if (isNoAdapter(e)) {
+        const message = e instanceof Error ? e.message : String(e)
+        throw new Error(
+          `蒸馏模型路由 ${route.provider}/${route.model} 缺少 provider 适配器（${message}）：` +
+            '会话级 llm 实例可能已随会话结束释放，请在会话活跃期间触发蒸馏，或检查宿主是否加载了 provider 适配器插件',
+        )
+      }
+      throw e
     }
     // Defensive: tolerate both object {kind, ...} and bare-string finish
     // shapes; the bare-string form has never been observed in any known

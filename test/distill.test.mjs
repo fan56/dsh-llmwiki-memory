@@ -226,11 +226,13 @@ test('pickLiveLlm: scoped wins, route-less and disposed candidates are skipped',
   assert.equal(pickLiveLlm([scopedLive, root], 'p'), scopedLive, 'first candidate carrying the route wins')
   const dead = { stream() {}, get listProviders() { throw new Error('disposed scope') } }
   assert.equal(pickLiveLlm([dead, root], 'zai-coding-cn'), root, 'disposed scope (throws on access) is skipped')
-  const legacy = { stream() {} } // no listProviders → cannot probe, still usable
-  assert.equal(pickLiveLlm([legacy], 'p'), legacy)
-  // ① no reachable instance at all (missing / disposed on access).
+  // ① no reachable, provable instance at all (missing / disposed / probe-less).
   assert.throws(() => pickLiveLlm([undefined, undefined], 'p'), /没有可用的模型服务实例/)
   assert.throws(() => pickLiveLlm([dead], 'p'), /没有可用的模型服务实例/)
+  // A probe-less instance cannot vouch for an adapter — it must NOT be trusted
+  // with a distill call (a later stream() would surface a RAW NO_ADAPTER).
+  const unprobeable = { stream() {} }
+  assert.throws(() => pickLiveLlm([unprobeable], 'p'), /没有可用的模型服务实例/)
   // ② reachable instances, none carrying the route — say which provider failed.
   assert.throws(
     () => pickLiveLlm([scopedStale], 'zai-coding-cn'),
@@ -240,6 +242,7 @@ test('pickLiveLlm: scoped wins, route-less and disposed candidates are skipped',
 
 test('defaultModelCaller: probes candidates before streaming; all-dead throws readable Chinese', async () => {
   const streamed = []
+  const seenReqs = []
   const live = {
     listProviders: () => [{ id: 'p' }],
     stream: async function* (options) {
@@ -251,12 +254,46 @@ test('defaultModelCaller: probes candidates before streaming; all-dead throws re
     },
   }
   const dead = { stream() {}, get listProviders() { throw new Error('disposed') } }
-  const caller = defaultModelCaller(() => [dead, live], () => ({ provider: 'p', model: 'm' }))
-  const text = await caller({ system: 's', user: 'u', purpose: 't', maxTokens: 10 })
+  const caller = defaultModelCaller(
+    (req) => {
+      seenReqs.push(req?.sessionId)
+      return [dead, live]
+    },
+    () => ({ provider: 'p', model: 'm' }),
+  )
+  const text = await caller({ system: 's', user: 'u', purpose: 't', sessionId: 's1', maxTokens: 10 })
   assert.equal(text, 'hello')
   assert.deepEqual(streamed, ['p'], 'stream went to the live instance, never the dead one')
+  assert.deepEqual(seenReqs, ['s1'], 'the triggering session id reaches getCandidates (per-session capture lookup)')
   const deadCaller = defaultModelCaller(() => [undefined, undefined], () => ({ provider: 'p', model: 'm' }))
   await assert.rejects(() => deadCaller({ system: 's', user: 'u', purpose: 't', maxTokens: 10 }), /没有可用的模型服务实例/)
+})
+
+test('defaultModelCaller: NO_ADAPTER from stream is rethrown readable, other failures untouched', async () => {
+  // Hostile shape: the route table lists the provider but the adapter registry
+  // misses it at dispatch — exactly what a raw 'no adapter registered for
+  // provider' in distill-state looks like. The pre-flight cannot see it, so
+  // the stream boundary must translate it.
+  const hostile = {
+    listProviders: () => [{ id: 'p' }],
+    stream: async function* () {
+      throw Object.assign(new Error('no adapter registered for provider "p"'), { code: 'NO_ADAPTER' })
+    },
+  }
+  const caller = defaultModelCaller(() => [hostile], () => ({ provider: 'p', model: 'm' }))
+  await assert.rejects(
+    () => caller({ system: 's', user: 'u', purpose: 't', maxTokens: 10 }),
+    /缺少 provider 适配器.*no adapter registered for provider "p"/,
+    'NO_ADAPTER becomes a readable distill failure naming the route',
+  )
+  const auth = {
+    listProviders: () => [{ id: 'p' }],
+    stream: async function* () {
+      throw new Error('provider rejected the key')
+    },
+  }
+  const authCaller = defaultModelCaller(() => [auth], () => ({ provider: 'p', model: 'm' }))
+  await assert.rejects(() => authCaller({ system: 's', user: 'u', purpose: 't', maxTokens: 10 }), /provider rejected the key/)
 })
 
 test('distiller: dead llm scope records a readable failure instead of a raw NO_ADAPTER', async () => {
