@@ -41,7 +41,7 @@ export interface DistillOp {
 
 export interface DistillResult {
   ok: boolean
-  reason?: 'no-model' | 'no-observations' | 'in-flight' | 'model-error' | 'invalid-output' | 'no-ops'
+  reason?: 'no-model' | 'no-observations' | 'in-flight' | 'model-error' | 'invalid-output' | 'no-ops' | 'stalled'
   created: string[]
   updated: string[]
   marked: number
@@ -240,11 +240,18 @@ export class Distiller {
     if (!progress) {
       return {
         ok: false,
-        reason: failureReason ?? (stopped === 'no-ops' ? 'no-ops' : undefined),
+        reason:
+          failureReason ??
+          (stopped === 'no-ops' ? 'no-ops' : stopped === 'stalled' ? 'stalled' : undefined),
         created: [],
         updated: [],
         marked: 0,
-        detail: failureDetail,
+        // A stalled run must never land as an unexplained failure: name the
+        // likely cause (ops referencing slugs that do not exist) so the
+        // distill-state stays actionable.
+        detail:
+          failureDetail ??
+          (stopped === 'stalled' ? '批次 ops 未消费任何观察（常见原因：ops 引用了不存在的 topic slug）' : undefined),
       }
     }
     const head =
@@ -509,12 +516,17 @@ function isNoAdapter(error: unknown): boolean {
  * True for the output-token-limit finish — the one model failure a smaller
  * batch can actually rescue (fewer observations in, fewer ops out). Stamped
  * as `code: 'MAX_TOKENS'` by defaultModelCaller's finish branch; the message
- * regex also catches raw provider shapes where no stamp survives.
+ * fallback is anchored to the exact finish shape this lane itself emits
+ * (`model finish: <kind>`), so a request-side error that merely mentions
+ * max-tokens in its text can never trigger the persistent batch shrink.
  */
 function isMaxTokens(error: unknown): boolean {
   if (error === null || typeof error !== 'object') return false
   if ((error as { code?: unknown }).code === 'MAX_TOKENS') return true
-  return typeof (error as { message?: unknown }).message === 'string' && /\bmax-tokens\b|\bfinish: length\b/i.test((error as { message: string }).message)
+  return (
+    typeof (error as { message?: unknown }).message === 'string' &&
+    /^model finish: (max-tokens|length)$/i.test((error as { message: string }).message)
+  )
 }
 
 /**

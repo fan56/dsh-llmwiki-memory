@@ -510,6 +510,56 @@ test('distiller: a batch that consumes nothing stops the run (no same-head repea
   }
 })
 
+test('distiller: a zero-progress stall records a readable reason, not a bare failure', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 3)
+    let calls = 0
+    // Ops come back but reference a slug that does not exist → nothing is
+    // consumed (marked 0) and the head cannot advance: the stalled stop.
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      return JSON.stringify({
+        ops: [{ op: 'update', slug: 'no-such-topic', conclusion: 'x', observed_ids: ['obs-1'] }],
+      })
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 1, 'stall stops the run, never a same-head repeat')
+    assert.equal(r.ok, false)
+    assert.equal(r.reason, 'stalled', 'the failure record must name the stall, not land reason-less')
+    assert.match(r.detail ?? '', /未消费/)
+    assert.match(r.detail ?? '', /slug/)
+    assert.equal((await h.store.undistilledObservations()).length, 3)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: a request-side error mentioning max-tokens is fatal, not a shrink trigger', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 5)
+    let calls = 0
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      // No code stamp, and the text merely mentions max-tokens — the anchored
+      // message fallback must NOT classify this as the retryable output-limit
+      // finish (the old loose regex halved the batch and burned the budget).
+      throw new Error('request rejected: max-tokens parameter must be positive')
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 1, 'a request-side error gets no halving retry')
+    assert.equal(r.ok, false)
+    assert.equal(r.reason, 'model-error')
+    assert.doesNotMatch(r.detail ?? '', /无法再缩小/)
+    assert.equal((await h.store.undistilledObservations()).length, 5)
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('defaultModelCaller: output-limit finishes are code-stamped MAX_TOKENS (retryable class)', async () => {
   const req = { system: 's', user: 'u', purpose: 't', maxTokens: 10 }
   for (const finish of [{ kind: 'max-tokens' }, { kind: 'length' }]) {
