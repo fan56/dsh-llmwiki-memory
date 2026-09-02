@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BundleStore } from '../lib/store.js'
 import { WikiService } from '../lib/service.js'
-import { Distiller, defaultModelCaller, parseOps, pickLiveLlm } from '../lib/distill.js'
+import { Distiller, SYSTEM_PROMPT, defaultModelCaller, parseOps, pickLiveLlm } from '../lib/distill.js'
 
 function make(cfgOverrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'llmwiki-distill-'))
@@ -501,9 +501,13 @@ test('distiller: a batch that consumes nothing stops the run (no same-head repea
       return consumeOps([ids[0]]) // always "consumes" the first observation
     })
     const r = await d.run('s1')
-    assert.equal(calls, 2, 'second batch consumed nothing → stop, never a third same-head call')
+    // Batch 1 consumes ids[0]. Batch 2 re-references ids[0], which is not in
+    // that batch → unattributable → exactly one corrective retry → still
+    // zero → the stalled stop. Never a fourth same-head call.
+    assert.equal(calls, 3, 'stalling batch gets one corrective retry, then the run stops')
     assert.equal(r.ok, true)
     assert.equal(r.marked, 1)
+    assert.match(r.detail ?? '', /observed_ids/)
     assert.equal((await h.store.undistilledObservations()).length, 2)
   } finally {
     h.cleanup()
@@ -514,18 +518,20 @@ test('distiller: a zero-progress stall records a readable reason, not a bare fai
   const h = make()
   try {
     await h.store.ensure()
-    await appendObs(h.store, 3)
+    const ids = await appendObs(h.store, 3)
     let calls = 0
     // Ops come back but reference a slug that does not exist → nothing is
-    // consumed (marked 0) and the head cannot advance: the stalled stop.
+    // consumed (marked 0) and the head cannot advance: the stalled stop. The
+    // observed_ids ARE batch-valid, so the stall is a slug problem — no
+    // corrective observed_ids retry is spent on it.
     const d = new Distiller(h.service, async () => {
       calls += 1
       return JSON.stringify({
-        ops: [{ op: 'update', slug: 'no-such-topic', conclusion: 'x', observed_ids: ['obs-1'] }],
+        ops: [{ op: 'update', slug: 'no-such-topic', conclusion: 'x', observed_ids: [ids[0]] }],
       })
     })
     const r = await d.run('s1')
-    assert.equal(calls, 1, 'stall stops the run, never a same-head repeat')
+    assert.equal(calls, 1, 'a bad-slug stall stops the run without an observed_ids retry')
     assert.equal(r.ok, false)
     assert.equal(r.reason, 'stalled', 'the failure record must name the stall, not land reason-less')
     assert.match(r.detail ?? '', /未消费/)
@@ -571,5 +577,118 @@ test('defaultModelCaller: output-limit finishes are code-stamped MAX_TOKENS (ret
     }
     assert.ok(err !== undefined, `${JSON.stringify(finish)} finish rejects`)
     assert.equal(err.code, 'MAX_TOKENS', `${finish.kind} is classified as the smaller-batch-retryable failure`)
+  }
+})
+
+// ---- observed_ids enforcement: sanitize + one corrective retry ----
+
+test('distiller: prompt hard-requires verbatim observed_ids on every op', () => {
+  assert.match(SYSTEM_PROMPT, /硬性要求：每个 op 必须带 observed_ids/)
+  assert.match(SYSTEM_PROMPT, /逐字复制/)
+  assert.match(SYSTEM_PROMPT, /create 填它所综合依据的观察 id/)
+  assert.match(SYSTEM_PROMPT, /update 填促使本次修订的观察 id/)
+  assert.match(SYSTEM_PROMPT, /会被整体丢弃/, 'the consequence of missing/invalid ids is spelled out')
+})
+
+test('distiller: all-invalid observed_ids → one corrective retry rescues the batch', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    const ids = await appendObs(h.store, 3)
+    let calls = 0
+    const d = new Distiller(h.service, async (req) => {
+      calls += 1
+      if (calls === 1) {
+        return JSON.stringify({
+          ops: [{ op: 'create', title: '幻觉主题', conclusion: '结论', observed_ids: ['obs-hallucinated'] }],
+        })
+      }
+      assert.match(req.user, /纠错重试/)
+      assert.match(req.user, /逐字/)
+      assert.ok(req.user.includes(ids[0]), 'the legal id list is spelled out in the correction message')
+      return consumeOps(ids)
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 2, 'original call + exactly one corrective retry')
+    assert.equal(r.ok, true)
+    assert.equal(r.marked, 3)
+    assert.equal((await h.store.undistilledObservations()).length, 0)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: corrective retry is capped at one — a second zero pass stalls readably', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 2)
+    let calls = 0
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      return JSON.stringify({
+        ops: [{ op: 'create', title: '幻觉主题', conclusion: '结论', observed_ids: ['obs-hallucinated'] }],
+      })
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 2, 'original + one correction, never a third')
+    assert.equal(r.ok, false)
+    assert.equal(r.reason, 'stalled')
+    assert.match(r.detail ?? '', /observed_ids/)
+    assert.match(r.detail ?? '', /纠错重试/)
+    // The hallucinated-op topic never lands: unattributable writes are held back.
+    assert.equal((await h.store.undistilledObservations()).length, 2)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: partial valid ids mark without retry; filtered count lands in detail', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    const o = await h.store.appendObservation({ kind: 'turn', source: 'auto', text: '唯一观察' })
+    let calls = 0
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      return JSON.stringify({
+        ops: [
+          { op: 'create', title: '有效主题', conclusion: '结论一', observed_ids: [o.id] },
+          { op: 'create', title: '幻觉主题', conclusion: '结论二', observed_ids: ['obs-hallucinated'] },
+        ],
+      })
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 1, 'partial progress needs no corrective retry')
+    assert.equal(r.ok, true)
+    assert.equal(r.marked, 1)
+    assert.equal(r.created.length, 1, 'the unattributable op is held back; only the valid one lands')
+    assert.match(r.detail ?? '', /filtered 1 invalid observed_ids/)
+    assert.equal((await h.store.undistilledObservations()).length, 0)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: corrective retry respects the call budget (no free lane)', async () => {
+  const h = make({ distillMaxModelCalls: 1 })
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 2)
+    let calls = 0
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      return JSON.stringify({
+        ops: [{ op: 'create', title: '幻觉主题', conclusion: '结论', observed_ids: ['obs-hallucinated'] }],
+      })
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 1, 'a budget of 1 leaves no room for the corrective retry')
+    assert.equal(r.ok, false)
+    assert.equal(r.reason, 'stalled')
+    assert.match(r.detail ?? '', /预算/)
+    assert.equal((await h.store.undistilledObservations()).length, 2)
+  } finally {
+    h.cleanup()
   }
 })
