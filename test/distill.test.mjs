@@ -911,3 +911,59 @@ test('distiller: stalled batches (parseable ops, zero consumption) still count t
     h.cleanup()
   }
 })
+
+test('distiller: a failed distill-state write surfaces in the returned detail; marks still land', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    const o1 = await h.store.appendObservation({ kind: 'finding', source: 'auto', text: '观察到一' })
+    const o2 = await h.store.appendObservation({ kind: 'decision', source: 'model', text: '观察到二', sessionId: 's1' })
+    const modelJson = JSON.stringify({
+      ops: [
+        {
+          op: 'create',
+          title: 'dsh-cron 定时方案',
+          description: '定时任务落地方式',
+          tags: ['dsh', 'cron'],
+          depends: [],
+          open_questions: ['错过窗口是否补跑'],
+          impact: ['运维流程'],
+          conclusion: 'dsh 无原生 cron；用 headless 会话加 OS cron，最长窗口一年。',
+          recommendations: '配每日 schedule 兜底。',
+          status: 'draft',
+          observed_ids: [o1.id, o2.id],
+        },
+      ],
+    })
+    const d = new Distiller(h.service, async () => modelJson)
+    const realWrite = h.store.writeDistillState.bind(h.store)
+    let failNext = true
+    h.store.writeDistillState = async (state) => {
+      if (failNext) {
+        failNext = false
+        throw new Error('disk on fire')
+      }
+      return realWrite(state)
+    }
+    // The write fails: the run must still succeed (marks are independent of
+    // the state file), but the detail must say so — a silent swallow is what
+    // made a stale distill-state.json look like "manual runs never write".
+    const r1 = await d.run('s1')
+    assert.equal(r1.ok, true)
+    assert.match(r1.detail ?? '', /distill-state 写入失败: disk on fire/)
+    assert.equal((await h.store.undistilledObservations()).length, 0, 'marks landed despite the failed write')
+    assert.equal(await h.store.readDistillState(), undefined, 'nothing was persisted for the failed run')
+    // A healthy subsequent run persists the state file again, with no note.
+    const o3 = await h.store.appendObservation({ kind: 'finding', source: 'auto', text: '观察到三' })
+    const d2 = new Distiller(
+      h.service,
+      async () =>
+        JSON.stringify({ ops: [{ op: 'create', title: '第二个主题', conclusion: '结论', observed_ids: [o3.id] }] }),
+    )
+    const r2 = await d2.run('s1')
+    assert.doesNotMatch(r2.detail ?? '', /写入失败/)
+    assert.equal((await h.store.readDistillState())?.ok, true)
+  } finally {
+    h.cleanup()
+  }
+})

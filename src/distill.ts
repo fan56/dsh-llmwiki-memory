@@ -190,6 +190,10 @@ export class Distiller {
     const detail =
       result.detail === undefined ? (gcNote === '' ? undefined : gcNote.replace(/^；/, '')) : `${result.detail}${gcNote}`
     // Persist the outcome — /wiki status and e2e diagnostics both read it.
+    // A failed write must not masquerade as success: the marks have already
+    // landed, so the only witness left is the run detail the command output
+    // shows. Surface the write error there instead of swallowing it.
+    let stateNote = ''
     await this.service.store
       .writeDistillState({
         at: new Date().toISOString(),
@@ -201,8 +205,12 @@ export class Distiller {
         gcDropped: result.gcDropped,
         detail,
       })
-      .catch(() => undefined)
-    return { ...result, detail }
+      .catch((err: unknown) => {
+        stateNote = `；distill-state 写入失败: ${err instanceof Error ? err.message : String(err)}`
+      })
+    const fullDetail =
+      stateNote === '' ? detail : detail === undefined ? stateNote.replace(/^；/, '') : `${detail}${stateNote}`
+    return { ...result, detail: fullDetail }
   }
 
   private async runInner(sessionId?: string): Promise<DistillResult> {

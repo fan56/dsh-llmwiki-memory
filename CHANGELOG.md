@@ -34,6 +34,7 @@
   - observer 对非文本内容块（alpha.3 起子代理后续消息可带 image 块）显式按 text 过滤，并补测试锁定。
   - CI/Release 的真宿主 smoke 改装 `@deepseek-ai/dsh@alpha`（滚动 dist-tag）。
 - Known limitation：观察 JSONL 的读取窗口是最新 2000 条，markDistilled / recordUnconsumed 的整文件重写只覆盖窗口内记录——窗口外的历史行会在重写时被截断（存量问题，本批不修）。
+- distill-state 写入失败不再被静默吞掉：写入错误追加进 run 结果 detail（`/wiki distill` 输出立即可见）——marks 与 state 写入相互独立，此前写失败时消化照常、state 文件却停在旧值，看起来像「手动 run 从不写 state」。
 
 ## 0.3.0 (2026-09-01)
 

@@ -184,14 +184,28 @@ test('settleBounded: resolves as soon as the run settles; rejections are swallow
 })
 
 test('settleBounded: caps a hanging run so exit never wedges', async () => {
-  const start = Date.now()
-  await settleBounded(new Promise(() => {}), 40)
-  const elapsed = Date.now() - start
-  assert.ok(elapsed >= 35 && elapsed < 5000, `the cap fired instead of the hang (elapsed=${elapsed}ms)`)
+  // The cap timer is unref'd by design: an idle host loop must exit without
+  // being kept alive by the bound. A test loop IS idle, so without a ref'd
+  // keep-alive Node exits before the cap fires and this promise never
+  // resolves (CI: "event loop has already resolved"). Hold the loop open for
+  // the duration, then release it.
+  const keepAlive = setInterval(() => {}, 10)
+  try {
+    const start = Date.now()
+    await settleBounded(new Promise(() => {}), 40)
+    const elapsed = Date.now() - start
+    assert.ok(elapsed >= 35 && elapsed < 5000, `the cap fired instead of the hang (elapsed=${elapsed}ms)`)
+  } finally {
+    clearInterval(keepAlive)
+  }
 })
 
 test('lifecycle: the effect disposer awaits the exit distill before resolving', async () => {
   const h = bootPlugin({ ...CFG })
+  // Keep-alive: the 90s exit cap inside the disposer is unref'd (see the
+  // settleBounded test above); hold the loop open so the cap can fire in a
+  // harness whose otherwise-idle loop would exit before it.
+  const keepAlive = setInterval(() => {}, 50)
   try {
     const store = new BundleStore(h.root)
     await store.ensure()
@@ -216,12 +230,15 @@ test('lifecycle: the effect disposer awaits the exit distill before resolving', 
     assert.equal((await store.readDistillState())?.ok, true, 'the exit distill landed before dispose resolved')
     assert.equal((await store.undistilledObservations()).length, 0)
   } finally {
+    clearInterval(keepAlive)
     h.cleanup()
   }
 })
 
 test('lifecycle: the exit dispose trigger is skipped while a session-end run is in flight', async () => {
   const h = bootPlugin({ ...CFG })
+  // Keep-alive for the same unref'd-cap reason as the settleBounded test.
+  const keepAlive = setInterval(() => {}, 50)
   try {
     const store = new BundleStore(h.root)
     await store.ensure()
@@ -274,6 +291,7 @@ test('lifecycle: the exit dispose trigger is skipped while a session-end run is 
     assert.equal((await store.allObservations())[0].distilled, true, 'the observation was consumed exactly once')
     assert.equal(await store.readTopic('end-run-topic') !== undefined, true, 'its topic landed')
   } finally {
+    clearInterval(keepAlive)
     h.cleanup()
   }
 })
