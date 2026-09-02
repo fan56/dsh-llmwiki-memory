@@ -35,7 +35,7 @@ export const LlmwikiConfig = z.object({
   /** Max auto-captured chars per side (user/assistant) per turn. */
   observationMaxChars: z.number().default(2000),
   /** Background distill cadence: every N turns of a long session. */
-  distillEveryTurns: z.number().default(20),
+  distillEveryTurns: z.number().default(5),
   /** Distill once when a session ends. */
   distillOnSessionEnd: z.boolean().default(true),
   /** Distill lane model route; both must be set, else distill stays idle. */

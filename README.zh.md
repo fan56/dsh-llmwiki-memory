@@ -73,7 +73,7 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 | `includeSubagents` | `true` | 注入与观察是否作用于子代理会话（ADR 0011）；`off` = 子代理整体跳过 |
 | `observationMaxChars` | `2000` | 每侧每轮观察截断长度 |
 | `distillProvider` / `distillModel` | 空（蒸馏关闭） | 蒸馏 lane 模型路由，两者都设置才启用。有 UI 时 `/wiki set distill-provider` / `distill-model` 不带值会弹选择面板（provider 列表 → 该 provider 的模型目录）；带值时 `distill-model` 支持 `provider model` 或 `provider/model` 混写自动拆成两个键 |
-| `distillEveryTurns` | `20` | 长 session 每 N 轮触发一次蒸馏 |
+| `distillEveryTurns` | `5` | 长 session 每 N 轮触发一次蒸馏 |
 | `distillOnSessionEnd` | `true` | session 结束时蒸馏一次 |
 | `pushDebounceSeconds` | `45` | GitHub 模式去抖推送间隔 |
 

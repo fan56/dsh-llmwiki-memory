@@ -73,7 +73,7 @@ First-time setup belongs to `/wiki onboard`; day-to-day tuning is `/wiki set <ke
 | `includeSubagents` | `true` | Whether injection and observation also engage subagent sessions (ADR 0011); `off` skips them entirely |
 | `observationMaxChars` | `2000` | Per-side per-turn observation truncation |
 | `distillProvider` / `distillModel` | empty (distill off) | Distill lane model route; both must be set to enable. With a UI, `/wiki set distill-provider` / `distill-model` without a value opens a picker panel (provider list → that provider's model catalog); a mixed `provider model` / `provider/model` value for `distill-model` splits into both keys |
-| `distillEveryTurns` | `20` | Distill every N turns of a long session |
+| `distillEveryTurns` | `5` | Distill every N turns of a long session |
 | `distillOnSessionEnd` | `true` | Distill once when a session ends |
 | `pushDebounceSeconds` | `45` | GitHub-mode debounced push interval |
 
