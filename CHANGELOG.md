@@ -1,6 +1,6 @@
 # Changelog
 
-## 未发布
+## 0.5.0 (2026-09-02)
 
 - 吞吐：`distillMaxModelCalls` 默认 3 → 8。预算 3 次时每个 run 只消化 9–14 条观察，清 300 条积压要 20+ 个 run；批循环之下 8 次一轮可消化约 30–40 条（清积压场景的默认值，显式配置不受影响）。
 - 观察 GC：被模型实际评估（返回可解析应答）却未被任何 op 消费的观察记一次 failed attempt（`attempts` 计数，store 层 `recordUnconsumed`，与 markDistilled 同一持久化队列），连续 3 次（`OBSERVATION_MAX_ATTEMPTS`）即物理删除（用户已授权删除 lane 明确无法处理的观察数据）。删除数写入 distill-state detail（`gc: dropped N unprocessable observation(s)`）、state 文件 `gcDropped` 字段与 run 结果；删除发生时立即 commit（数据销毁必须 git 可追溯），纯计数沿用 flush 节奏。被消费的观察经 markDistilled 自然退出候选池、不参与计数。
