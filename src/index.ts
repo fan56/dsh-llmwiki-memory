@@ -413,5 +413,7 @@ const DEFAULTS: LlmwikiConfigValue = {
   distillOnSessionEnd: true,
   distillProvider: '',
   distillModel: '',
+  distillBatchSize: 40,
+  distillMaxModelCalls: 3,
   pushDebounceSeconds: 45,
 }

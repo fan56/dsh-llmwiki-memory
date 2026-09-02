@@ -41,6 +41,10 @@ export const LlmwikiConfig = z.object({
   /** Distill lane model route; both must be set, else distill stays idle. */
   distillProvider: z.string().default(''),
   distillModel: z.string().default(''),
+  /** Observations per distill model call; auto-halves on output-limit failures (floor 5). */
+  distillBatchSize: z.number().default(40),
+  /** Max model calls per distill run — successful batches keep their marks (partial progress). */
+  distillMaxModelCalls: z.number().default(3),
   /** Debounced push delay in GitHub mode. */
   pushDebounceSeconds: z.number().default(45),
 })
@@ -63,6 +67,8 @@ export type LlmwikiConfigValue = {
   distillOnSessionEnd: boolean
   distillProvider: string
   distillModel: string
+  distillBatchSize: number
+  distillMaxModelCalls: number
   pushDebounceSeconds: number
 }
 
@@ -84,6 +90,8 @@ export const CONFIG_KEYS = [
   'distillOnSessionEnd',
   'distillProvider',
   'distillModel',
+  'distillBatchSize',
+  'distillMaxModelCalls',
   'pushDebounceSeconds',
 ] as const
 
@@ -119,6 +127,8 @@ export function parseConfigValue(key: ConfigKey, raw: string): boolean | number 
     case 'recencyWindowDays':
     case 'observationMaxChars':
     case 'distillEveryTurns':
+    case 'distillBatchSize':
+    case 'distillMaxModelCalls':
     case 'pushDebounceSeconds': {
       const n = Number(raw)
       if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return { error: `${key} 需要非负整数` }

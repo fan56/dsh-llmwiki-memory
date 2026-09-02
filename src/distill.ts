@@ -63,14 +63,60 @@ const SYSTEM_PROMPT = [
   '- 中文主题用中文写；tags 全小写。',
 ].join('\n')
 
+/** Adaptive-batch floor — below this, shrinking cannot rescue an output limit. */
+const MIN_BATCH_SIZE = 5
+/** Fallbacks when the config fields are absent (bare test harnesses). */
+const DEFAULT_BATCH_SIZE = 40
+const DEFAULT_MAX_MODEL_CALLS = 3
+
+/** Minimal observation surface the batch payload needs (structural, no store import). */
+interface ObservationLike {
+  id: string
+  kind: string
+  source: string
+  text: string
+}
+
+/** Outcome of one model call over one batch (see Distiller.runBatch). */
+interface BatchOutcome {
+  created: string[]
+  updated: string[]
+  marked: number
+  /** Model returned valid JSON with an empty ops array. */
+  noOps?: boolean
+  /** Model call died on the output-token limit (retryable with a smaller batch). */
+  maxTokens?: boolean
+  /** Non-retryable call failure classification (parse or stream error). */
+  fatalReason?: 'model-error' | 'invalid-output'
+  detail?: string
+}
+
 export class Distiller {
   private inFlight = new Map<string, Promise<DistillResult>>()
   private readonly service: WikiService
   private readonly caller: ModelCaller | undefined
+  /** Live batch size — adopted from config each run, shrunk on output-limit failures. */
+  private batchSize = DEFAULT_BATCH_SIZE
+  /** Config value the live batch size was adopted from; a config change resets the shrink state. */
+  private batchSizeBase = DEFAULT_BATCH_SIZE
 
   constructor(service: WikiService, caller: ModelCaller | undefined) {
     this.service = service
     this.caller = caller
+  }
+
+  /**
+   * Adopt the configured batch size for this run. The shrink state sticks
+   * across runs (a model that overflowed at 40 stays at 20 until restart),
+   * but an explicit config change resets it — /wiki set is the manual
+   * grow-back lever, so the lane needs no speculative auto-recovery that
+   * would just re-pay a failed call on every run.
+   */
+  private adoptBatchSize(configured: number): void {
+    if (this.batchSizeBase !== configured) {
+      this.batchSizeBase = configured
+      this.batchSize = configured
+    }
   }
 
   get configured(): boolean {
@@ -118,10 +164,112 @@ export class Distiller {
     if (!this.configured || this.caller === undefined) {
       return { ok: false, reason: 'no-model', created: [], updated: [], marked: 0 }
     }
-    const observations = await this.service.store.undistilledObservations(40)
-    if (observations.length === 0) {
-      return { ok: false, reason: 'no-observations', created: [], updated: [], marked: 0 }
+    // Bounded batch loop (livelock fix): the pre-fix lane fed the whole
+    // newest-40 undistilled window into one model call and failed the entire
+    // run on a single output-limit overflow — nothing was ever marked, so
+    // the same batch was re-fetched forever. The loop walks the pool in
+    // batches, halves the batch on an output-limit failure (the escape
+    // hatch: a smaller head provably converges toward the floor), stops when
+    // a batch cannot make progress, and keeps the marks of every successful
+    // batch (partial progress beats zero progress) under a per-run budget.
+    const cfg = this.service.cfg
+    // The floor bounds the ADAPTIVE shrink only — an explicit (small) config
+    // value is honored as-is, clamped merely to a positive fetch size.
+    this.adoptBatchSize(Math.max(1, cfg.distillBatchSize ?? DEFAULT_BATCH_SIZE))
+    const maxCalls = Math.max(1, cfg.distillMaxModelCalls ?? DEFAULT_MAX_MODEL_CALLS)
+    const created: string[] = []
+    const updated: string[] = []
+    let marked = 0
+    let calls = 0
+    // Why the loop ended before draining the pool (undefined = pool drained).
+    let stopped: 'budget' | 'no-ops' | 'stalled' | 'max-tokens' | 'failure' | undefined
+    let failureReason: 'model-error' | 'invalid-output' | undefined
+    let failureDetail: string | undefined
+    let firstFetch = true
+    for (;;) {
+      const observations = await this.service.store.undistilledObservations(this.batchSize)
+      if (observations.length === 0) {
+        if (firstFetch) {
+          return { ok: false, reason: 'no-observations', created: [], updated: [], marked: 0 }
+        }
+        break
+      }
+      firstFetch = false
+      if (calls >= maxCalls) {
+        stopped = 'budget'
+        break
+      }
+      calls += 1
+      const outcome = await this.runBatch(sessionId, observations)
+      created.push(...outcome.created)
+      updated.push(...outcome.updated)
+      marked += outcome.marked
+      if (outcome.maxTokens) {
+        // Provisional failure record: if a later batch succeeds it stays
+        // unused (progress branch wins); if the run ends without progress
+        // (budget out, floor reached) it is exactly what the state should show.
+        failureReason = 'model-error'
+        failureDetail = outcome.detail
+        if (this.batchSize > MIN_BATCH_SIZE) {
+          this.batchSize = Math.max(MIN_BATCH_SIZE, Math.floor(this.batchSize / 2))
+          continue // retry the smaller same-head batch — the livelock escape
+        }
+        stopped = 'max-tokens'
+        failureDetail = `批次无法再缩小（当前 ${this.batchSize} 条）仍触发输出上限：${outcome.detail ?? 'model finish: max-tokens'}`
+        break
+      }
+      if (outcome.fatalReason !== undefined) {
+        stopped = 'failure'
+        failureReason = outcome.fatalReason
+        failureDetail = outcome.detail
+        break
+      }
+      if (outcome.noOps) {
+        stopped = 'no-ops'
+        break
+      }
+      if (outcome.marked === 0) {
+        // Ops came back but consumed none of this batch's observations — the
+        // head cannot advance, so re-calling would only repeat (or duplicate
+        // topics). Stop and surface what already landed.
+        stopped = 'stalled'
+        break
+      }
     }
+    const progress = created.length + updated.length > 0
+    if (!progress) {
+      return {
+        ok: false,
+        reason: failureReason ?? (stopped === 'no-ops' ? 'no-ops' : undefined),
+        created: [],
+        updated: [],
+        marked: 0,
+        detail: failureDetail,
+      }
+    }
+    const head =
+      stopped === 'budget'
+        ? `已达单次 run 模型调用预算（${calls}/${maxCalls}），剩余积压留待后续 run`
+        : stopped === 'max-tokens'
+          ? '随后批次触发输出上限，本轮停止'
+          : stopped === 'failure'
+            ? `随后批次失败，本轮停止：${failureDetail ?? 'unknown'}`
+            : stopped === 'no-ops'
+              ? '后续批次模型未产出 ops，本轮停止'
+              : stopped === 'stalled'
+                ? '后续批次未消费任何观察（继续只会重复），本轮停止'
+                : undefined
+    return {
+      ok: true,
+      created,
+      updated,
+      marked,
+      detail: head === undefined ? undefined : `partial: 已蒸馏标记 ${marked} 条观察（${calls} 次模型调用）；${head}`,
+    }
+  }
+
+  /** One model call over one batch: payload build → ops → topic writes → marks. */
+  private async runBatch(sessionId: string | undefined, observations: readonly ObservationLike[]): Promise<BatchOutcome> {
     const metas = await this.service.store.listTopics()
     // Real open questions need the docs; fetch for index (bounded).
     const indexDetailed = []
@@ -147,19 +295,34 @@ export class Distiller {
       '请输出蒸馏结果（严格 JSON，{"ops":[...]}）：',
     ].join('\n')
     let raw: string
+    const caller = this.caller
+    if (caller === undefined) {
+      // Unreachable via runInner (it guards), but never let a future call site
+      // turn a wiring bug into a silent invalid-output.
+      return { created: [], updated: [], marked: 0, fatalReason: 'model-error', detail: 'distill caller unavailable' }
+    }
     try {
-      raw = await this.caller({ system: SYSTEM_PROMPT, user, purpose: 'llmwiki-distill', sessionId, maxTokens: 4000 })
+      raw = await caller({ system: SYSTEM_PROMPT, user, purpose: 'llmwiki-distill', sessionId, maxTokens: 4000 })
     } catch (e) {
-      return { ok: false, reason: 'model-error', created: [], updated: [], marked: 0, detail: String(e instanceof Error ? e.message : e).slice(0, 200) }
+      const detail = String(e instanceof Error ? e.message : e).slice(0, 200)
+      return isMaxTokens(e)
+        ? { created: [], updated: [], marked: 0, maxTokens: true, detail }
+        : { created: [], updated: [], marked: 0, fatalReason: 'model-error', detail }
     }
     let ops: DistillOp[]
     try {
       ops = parseOps(raw)
     } catch (e) {
-      return { ok: false, reason: 'invalid-output', created: [], updated: [], marked: 0, detail: String(e instanceof Error ? e.message : e).slice(0, 200) }
+      return {
+        created: [],
+        updated: [],
+        marked: 0,
+        fatalReason: 'invalid-output',
+        detail: String(e instanceof Error ? e.message : e).slice(0, 200),
+      }
     }
     if (ops.length === 0) {
-      return { ok: false, reason: 'no-ops', created: [], updated: [], marked: 0 }
+      return { created: [], updated: [], marked: 0, noOps: true }
     }
     const created: string[] = []
     const updated: string[] = []
@@ -208,7 +371,7 @@ export class Distiller {
       marked = await this.service.store.markDistilled(consumedIds, consumedSlugs)
     }
     void this.service.sync?.schedulePush()
-    return { ok: created.length + updated.length > 0, created, updated, marked }
+    return { created, updated, marked }
   }
 }
 
@@ -343,6 +506,18 @@ function isNoAdapter(error: unknown): boolean {
 }
 
 /**
+ * True for the output-token-limit finish — the one model failure a smaller
+ * batch can actually rescue (fewer observations in, fewer ops out). Stamped
+ * as `code: 'MAX_TOKENS'` by defaultModelCaller's finish branch; the message
+ * regex also catches raw provider shapes where no stamp survives.
+ */
+function isMaxTokens(error: unknown): boolean {
+  if (error === null || typeof error !== 'object') return false
+  if ((error as { code?: unknown }).code === 'MAX_TOKENS') return true
+  return typeof (error as { message?: unknown }).message === 'string' && /\bmax-tokens\b|\bfinish: length\b/i.test((error as { message: string }).message)
+}
+
+/**
  * Default ModelCaller over the dsh LLM seam (`ctx.llm.stream` + BlockAssembler),
  * following dsh-session-title-llm's call policy. `getCandidates` supplies the
  * ordered instance candidates — production passes the triggering session's
@@ -408,7 +583,13 @@ export function defaultModelCaller(
     const finishKind = typeof finish === 'string' ? finish : finish?.kind
     const failure = typeof finish === 'object' && finish !== undefined ? finish.failure : undefined
     if (finish !== undefined && finishKind !== 'stop') {
-      throw new Error(failure?.message ?? `model finish: ${String(finishKind)}`)
+      const message = failure?.message ?? `model finish: ${String(finishKind)}`
+      if (finishKind === 'max-tokens' || finishKind === 'length') {
+        // Code-stamped so the distill loop can classify it as the one
+        // retryable-with-a-smaller-batch failure (isMaxTokens).
+        throw Object.assign(new Error(message), { code: 'MAX_TOKENS' })
+      }
+      throw new Error(message)
     }
     const blocks = assembler.blocks() as { type: string; text?: string }[]
     const text = blocks
