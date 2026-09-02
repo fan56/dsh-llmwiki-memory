@@ -3,7 +3,7 @@
 ## 未发布
 
 - 吞吐：`distillMaxModelCalls` 默认 3 → 8。预算 3 次时每个 run 只消化 9–14 条观察，清 300 条积压要 20+ 个 run；批循环之下 8 次一轮可消化约 30–40 条（清积压场景的默认值，显式配置不受影响）。
-- 观察 GC：被装入批次喂给模型但未被任何 op 消费的观察记一次 failed attempt（`attempts` 计数，store 层 `recordUnconsumed`，与 markDistilled 同一持久化队列），连续 3 次（`OBSERVATION_MAX_ATTEMPTS`）即物理删除（用户已授权删除 lane 明确无法处理的观察数据）。删除数写入 distill-state detail（`gc: dropped N unprocessable observation(s)`）、state 文件 `gcDropped` 字段与 run 结果；删除发生时立即 commit（数据销毁必须 git 可追溯），纯计数沿用 flush 节奏。被消费的观察经 markDistilled 自然退出候选池、不参与计数。
+- 观察 GC：被模型实际评估（返回可解析应答）却未被任何 op 消费的观察记一次 failed attempt（`attempts` 计数，store 层 `recordUnconsumed`，与 markDistilled 同一持久化队列），连续 3 次（`OBSERVATION_MAX_ATTEMPTS`）即物理删除（用户已授权删除 lane 明确无法处理的观察数据）。删除数写入 distill-state detail（`gc: dropped N unprocessable observation(s)`）、state 文件 `gcDropped` 字段与 run 结果；删除发生时立即 commit（数据销毁必须 git 可追溯），纯计数沿用 flush 节奏。被消费的观察经 markDistilled 自然退出候选池、不参与计数。
 - 会话退出赛跑：插件 disposer 现在等待退出触发的末次蒸馏落盘后再返回——有界等待，上限 90s（挂死的模型调用不会拖住宿主退出；cordis 卸载会 await async disposer）。此前 fire-and-forget 使该路径基本无效：进程退出必然赢下竞速，state 与 marks 常常来不及写。README 已知边界同步更新。
 - 新命令 `/wiki distill`：手动触发一次蒸馏 run——复用现有 lane、in-flight 守卫与触发时 llm 捕获（命令所在会话的 agent 作用域实例优先）。输出摘要与 distill state 字段一一对应（标记 N 条 / 新建 X / 更新 Y / GC 回收 Z / reason / detail）；观察池为空直接提示 no-observations、不空跑 lane；未接线、模型未配置、已有 run 在跑均给可读原因。
 - 修复蒸馏 100% 失败（NO_ADAPTER 写进 distill-state）的三个根因之一——lane 在无适配器的实例上执行：
@@ -22,12 +22,18 @@
   - Prompt 硬约束：system prompt 明确要求每个 op 必须带 `observed_ids` 且只能逐字复制本批输入的观察 id（create 填综合依据、update 填修订动因），缺失/为空/含列表外 id 的 op 无效。
   - 执行前清洗：每个 op 的 `observed_ids` 先与本批真实 id 集合求交再执行；清洗后零有效 id 的 op 整体扣住不落 topic（无效 topic 写入正是 marks 无法入账、重跑重复的根源），无效 id 数计入 `filtered N invalid observed_ids`（部分有效时进 run detail）。
   - 一次纠错重试：整批零有效 id 时追加「合法 id 列表 + 逐字回显要求」再调一次模型，计入 `distillMaxModelCalls` 预算（无免预算通道；预算不足直接零消费停机）；重试仍零有效或调用失败 → 走 stalled 停机并在 detail 说明。
+- GC 计数语义收紧（审查必改，数据销毁路径）：只有「模型确实给出可解析应答」的批次才计 failed attempt——fedIds 从「取批即记」移到「按 outcome 记」：调用抛错（网络/5xx 的 `model-error`）与输出不可解析（`invalid-output`）的批次不计；输出上限减半重试中尚未评估的批次不计（缩到下限仍溢出、no-ops、stalled、部分消费照常计数）。蒸馏路由未配置时 runInner 入口即以可读 `no-model` 短路（检查放在每次 run 而非接线时，`/wiki set distill-provider` 保持 live 生效）：不取批、不调模型、不记任何 attempt——三个 ECONNREFUSED run 从此不可能物理删除模型从未评估过的数据（此前实测 40 条观察 + 3 次连接拒绝 → 池清零）。
+- 会话退出触发与在途 session-end run 互斥：disposer 触发 fake-'dispose' run 前先查 in-flight（`hasAnyPending`），有 run 在跑即跳过本次——此前真实会话的 agent/disposed 末次蒸馏还在跑时，退出 run 会把同一全局队头批次双份喂给模型（双重评估 + attempt 双计）。
+- `/wiki distill` 的 manualDistill 在 request 被 decline（in-flight / 未配置）时同步释放本次捕获的 sessionLlm 条目（原来会留下无 settle hook 的无主条目）。
+- `store.appendObservation` 改走全局写队列：与 markDistilled / recordUnconsumed 的整文件重写串行化，消除观察 JSONL 的丢更新竞态。
+- `/wiki status` 新增「最近蒸馏」摘要行（读 distill-state：成功显示标记数/GC 回收数/时间，失败带 reason）——此前 README 声称 status 可查 distill-state 而 renderStatus 并未读取，属失实声明，现已成真。
 
 - 适配 dsh 宿主 0.1.2-alpha.3，放弃 rc 线兼容（peer 要求 `dsh-llm`/`dsh-tools`/`dsh-settings`/`dsh-commands`/`dsh-util-values` >= 0.1.2-alpha.3；`cordis` ^4.0.2、`schemastery` ^3.18.2；devDeps 精确钉 alpha.3 闭包）：
   - settings 命名空间改字面量 `'llmwiki'`（dsh-settings 0.1.2-alpha.3 删除了模块级 `settingsNamespace()`，注册改类型级品牌校验）；运行时不再 require dsh-settings。
   - 蒸馏 lane 的 LLM seam 对齐 alpha.3 `GenerateOptions`：`deepFreeze` 改从 `@deepseek-ai/dsh-util-values` 动态导入（dsh-llm 不再转发导出）；`purpose` 是封闭联合（仅 `compaction`/`session-title`）与 `sessionId` 为 `Branded<'SessionId'>`（loop 请求路由/回放游标语义），后台蒸馏调用均不再传，插件内 `ModelRequest` seam 保持不变；9d03334 的蒸馏候选预检（pickLiveLlm）与防御性 finish 兼容原样保留，选出的路由走修好的调用形态。
   - observer 对非文本内容块（alpha.3 起子代理后续消息可带 image 块）显式按 text 过滤，并补测试锁定。
   - CI/Release 的真宿主 smoke 改装 `@deepseek-ai/dsh@alpha`（滚动 dist-tag）。
+- Known limitation：观察 JSONL 的读取窗口是最新 2000 条，markDistilled / recordUnconsumed 的整文件重写只覆盖窗口内记录——窗口外的历史行会在重写时被截断（存量问题，本批不修）。
 
 ## 0.3.0 (2026-09-01)
 

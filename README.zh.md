@@ -32,7 +32,8 @@
 | 命令 | 用途 |
 |---|---|
 | `/wiki onboard` | 交互式配置向导：唤起 dsh 原生 ask-user 面板逐项问答（模式 / 仓库 / 蒸馏 / 注入档位 / 自动观察），末步确认才写入；无 ask-user UI 的环境自动退化为逐条输入 |
-| `/wiki status` | bundle 健康：topic 数、观察积压、冲突、同步状态 |
+| `/wiki status` | bundle 健康：topic 数、观察积压、冲突、最近蒸馏结果、同步状态 |
+| `/wiki distill` | 手动触发一次蒸馏 run（复用现有 lane 与 in-flight 守卫；输出摘要与 distill-state 字段一一对应） |
 | `/wiki stats` | 注入统计：hit rate、top-N、near-miss 分布与调参建议 |
 | `/wiki list` / `show` / `history` | 浏览 Topic、反向引用与变更史 |
 | `/wiki graph` | 生成关系图网页（力导向、可拖拽缩放、悬停看结论）并自动在浏览器打开 |
@@ -92,7 +93,8 @@ Bundle 默认在 `~/.dsh/llmwiki/`（`$DSH_LLMWIKI_HOME` 可覆盖）。装好�
 ## 已知边界
 
 - **子代理默认参与记忆，可整体关掉**：默认（`include-subagents` 开）注入与观察同样作用于子代理会话。`/wiki set include-subagents off` 后，delegation depth > 0 的子代理会话被整体跳过——不注入、不观察、不触发蒸馏；topic 工具始终在全局层（子代理显式 `topic_save` 不受开关影响）。跨进程子代理（claude-code/codex 等 provider）本就不加载本插件。
-- **headless 单发会话里的 session-end 蒸馏**：插件 disposer 现在会等待退出触发的末次蒸馏落盘（有界等待，上限 90s；挂死的模型调用在超时后放弃、退出照常进行），headless 进程默认不再输掉这场竞速。会话内 `/wiki distill` 手动触发则完全绕开竞速；`meta/distill-state.json` 记录每次 lane 的结局，`/wiki status` 可查。
+- **headless 单发会话里的 session-end 蒸馏**：插件 disposer 现在会等待退出触发的末次蒸馏落盘（有界等待，上限 90s；挂死的模型调用在超时后放弃、退出照常进行），headless 进程默认不再输掉这场竞速。90s 窗口内退出 run 可能只完成部分调用预算，剩余积压留待下次触发。已有 session-end run 在跑时退出触发整体跳过（否则同一全局队头批次会被双份喂给模型）。会话内 `/wiki distill` 手动触发则完全绕开竞速；`meta/distill-state.json` 记录每次 lane 的结局，`/wiki status` 可查。
+- **观察 GC（三振删除）**：被模型实际评估（返回了可解析应答，无论内容有无价值）却未被任何 op 消费的观察记一次 failed attempt，连续 3 次即物理删除（用户已明确授权删除 lane 确实无法处理的原始观察）。模型从未评估过的批次永不计数：基础设施失败（网络错误、蒸馏路由未配置 → 可读 `no-model` 短路）与输出不可解析（`invalid-output`）豁免；输出上限减半重试中的批次只有到达裁决（成功 / 触底 / stalled / 明确跳过）才计一次。删除立即 commit（数据销毁 git 可追溯），纯计数沿用 flush 节奏。
 - **配置读取时机**：`/wiki set` 与 settings.yaml 修改在下次会话启动后生效最稳。
 - **蒸馏选模型**：`/wiki onboard` 的蒸馏一步拆成两问（先 provider 后 model，模型列表取自该 provider 的目录），选完经 `resolveModelInfo` 预校验——provider 无活路由会阻断重选，模型目录校验非 NO_ADAPTER 失败（目录外，可能仍可用）则警告但放行；无 ask UI 或无可用模型路由的环境自动退回文本输入。`/wiki set` 的选择面板走同一套校验。
 
