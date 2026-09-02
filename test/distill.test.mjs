@@ -587,6 +587,7 @@ test('distiller: prompt hard-requires verbatim observed_ids on every op', () => 
   assert.match(SYSTEM_PROMPT, /逐字复制/)
   assert.match(SYSTEM_PROMPT, /create 填它所综合依据的观察 id/)
   assert.match(SYSTEM_PROMPT, /update 填促使本次修订的观察 id/)
+  assert.match(SYSTEM_PROMPT, /列表之外 id 的条目会被过滤/, 'out-of-list ids are filtered, not fatal to the op')
   assert.match(SYSTEM_PROMPT, /会被整体丢弃/, 'the consequence of missing/invalid ids is spelled out')
 })
 
@@ -687,6 +688,82 @@ test('distiller: corrective retry respects the call budget (no free lane)', asyn
     assert.equal(r.ok, false)
     assert.equal(r.reason, 'stalled')
     assert.match(r.detail ?? '', /预算/)
+    assert.equal((await h.store.undistilledObservations()).length, 2)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: scalar observed_ids string is normalized and rescued without retry', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    const ids = await appendObs(h.store, 1)
+    let calls = 0
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      // The commonest shape drift: the model returns a bare id, not a list.
+      return JSON.stringify({
+        ops: [{ op: 'create', title: 'T', conclusion: '结论', observed_ids: ids[0] }],
+      })
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 1, 'a rescuable scalar needs no corrective retry')
+    assert.equal(r.ok, true)
+    assert.equal(r.marked, 1)
+    assert.equal((await h.store.undistilledObservations()).length, 0)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: non-array non-string observed_ids counts as dropped and fires the retry gate', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    const ids = await appendObs(h.store, 2)
+    let calls = 0
+    const d = new Distiller(h.service, async (req) => {
+      calls += 1
+      if (calls === 1) {
+        // Neither list nor string: unrescuable, but must reach droppedForIds
+        // (previously a TypeError swallowed by the per-op catch — the stall
+        // then misattributed and the retry gate never fired).
+        return JSON.stringify({ ops: [{ op: 'create', title: 'T', conclusion: '结论', observed_ids: 42 }] })
+      }
+      assert.match(req.user, /纠错重试/)
+      return consumeOps(ids)
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 2, 'the retry gate fires for the unrescuable shape')
+    assert.equal(r.ok, true)
+    assert.equal(r.marked, 2)
+    assert.equal((await h.store.undistilledObservations()).length, 0)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: corrective retry that fails to produce ops stalls readably without a second retry', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 2)
+    let calls = 0
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      if (calls === 1) {
+        return JSON.stringify({
+          ops: [{ op: 'create', title: '幻觉主题', conclusion: '结论', observed_ids: ['obs-hallucinated'] }],
+        })
+      }
+      throw new Error('route unavailable')
+    })
+    const r = await d.run('s1')
+    assert.equal(calls, 2, 'original call + exactly one corrective retry, never a third')
+    assert.equal(r.ok, false)
+    assert.equal(r.reason, 'stalled')
+    assert.match(r.detail ?? '', /纠错重试未产出可消费的 ops（模型调用失败：route unavailable/)
     assert.equal((await h.store.undistilledObservations()).length, 2)
   } finally {
     h.cleanup()

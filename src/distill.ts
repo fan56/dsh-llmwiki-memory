@@ -57,7 +57,7 @@ export const SYSTEM_PROMPT = [
   '   "observed_ids":["obs-..."]}',
   '  {"op":"update","slug":"已有slug","conclusion":"修订后的完整结论","open_questions":[...],"observed_ids":["obs-..."]}',
   '规则：',
-  '- 硬性要求：每个 op 必须带 observed_ids 字段，值只能从本次输入「未蒸馏观察」里列出的 id 中逐字复制（形如 "obs-..."）；create 填它所综合依据的观察 id，update 填促使本次修订的观察 id。observed_ids 缺失、为空或含列表之外 id 的 op 一律无效，会被整体丢弃。',
+  '- 硬性要求：每个 op 必须带 observed_ids 字段，值只能从本次输入「未蒸馏观察」里列出的 id 中逐字复制（形如 "obs-..."）；create 填它所综合依据的观察 id，update 填促使本次修订的观察 id。含列表之外 id 的条目会被过滤；observed_ids 缺失、为空或过滤后不剩任何有效 id 的 op 会被整体丢弃。',
   '- conclusion 必须自含（不依赖观察原文也能读懂），写「目前有效的结论」，不是流水账。',
   '- 同一主题只允许一个 create；已有相近 topic 时用 update 修订它的 conclusion。',
   '- 观察里有价值就沉淀，没价值就跳过该观察（被跳过观察的 id 不要出现在任何 op 里）；没有可沉淀内容时输出 {"ops":[]}。',
@@ -480,7 +480,10 @@ export class Distiller {
   }
 
   /**
-   * Execute a batch's ops with observed_ids sanitized upfront. An op whose
+   * Execute a batch's ops with observed_ids sanitized upfront. A scalar
+   * observed_ids string (the commonest model shape drift) is normalized to a
+   * one-element list; other non-array shapes are held back as droppedForIds
+   * rather than dying in the per-op catch. An op whose
    * sanitized id set is empty is held back entirely (droppedForIds): an
    * unattributable topic write is one the marks can never account for, and
    * the stalled stop would leave it duplicated on the next run. Structural
@@ -499,8 +502,18 @@ export class Distiller {
     }
     for (const op of ops) {
       try {
-        const ids = (op.observed_ids ?? []).filter((id) => validIds.has(id))
-        applied.filteredIds += Math.max(0, (op.observed_ids?.length ?? 0) - ids.length)
+        // Shape normalization first: models most often deviate by returning a
+        // scalar string instead of a list — rescue it into a one-element list.
+        // Any other non-array shape counts toward droppedForIds so the
+        // corrective-retry gate fires, instead of a silent TypeError in the
+        // per-op catch below that would misattribute the stall.
+        const rawIds: readonly unknown[] = Array.isArray(op.observed_ids)
+          ? op.observed_ids
+          : typeof op.observed_ids === 'string'
+            ? [op.observed_ids]
+            : []
+        const ids = rawIds.filter((id): id is string => typeof id === 'string' && validIds.has(id))
+        applied.filteredIds += Math.max(0, rawIds.length - ids.length)
         if (ids.length === 0) {
           applied.droppedForIds += 1
           continue
