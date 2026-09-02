@@ -126,6 +126,17 @@ async function renderStatus(service: WikiService): Promise<string> {
     `  去重：${cfg.injectDedup ? '开（同会话已注入的 Topic 不重注）' : '关'}`,
     `  蒸馏：${cfg.distillProvider !== '' && cfg.distillModel !== '' ? `${cfg.distillProvider}/${cfg.distillModel}，每 ${cfg.distillEveryTurns} 轮` : '未配置模型（/wiki set distill-provider / distill-model）'}`,
   ]
+  // Last lane outcome (distill-state summary) — what "checkable via
+  // /wiki status" promises; absent until the first run of this bundle.
+  const lastRun = await service.store.readDistillState()
+  if (lastRun !== undefined) {
+    const outcome =
+      lastRun.ok === true
+        ? `标记 ${String(lastRun.marked ?? 0)} 条观察`
+        : `失败（${String(lastRun.reason ?? 'unknown')}）`
+    const gc = typeof lastRun.gcDropped === 'number' && lastRun.gcDropped > 0 ? `，GC 回收 ${lastRun.gcDropped}` : ''
+    lines.push(`  最近蒸馏：${outcome}${gc} @ ${String(lastRun.at ?? '').slice(0, 19).replace('T', ' ')}`)
+  }
   if (service.sync !== undefined) {
     lines.push(`  上次推送：${service.sync.lastPushAt ?? '从未'}`)
     if (service.sync.lastError !== '') lines.push(`  同步错误：${service.sync.lastError.split('\n').at(-1)}`)
