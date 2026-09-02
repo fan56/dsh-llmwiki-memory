@@ -174,6 +174,11 @@ export class Distiller {
     return this.inFlight.has(sessionId)
   }
 
+  /** True while ANY session's run is still in flight (exit-dispose guard). */
+  hasAnyPending(): boolean {
+    return this.inFlight.size > 0
+  }
+
   async run(sessionId?: string): Promise<DistillResult> {
     const result = await this.runInner(sessionId)
     // The GC count rides the detail (and the state file) so /wiki status and
@@ -204,6 +209,23 @@ export class Distiller {
     if (!this.configured || this.caller === undefined) {
       return { ok: false, reason: 'no-model', created: [], updated: [], marked: 0 }
     }
+    // Route gate — checked PER RUN here rather than once at wiring time, so
+    // `/wiki set distill-provider` stays live without a plugin reload. An
+    // empty route must never start lane bookkeeping: a GC attempt recorded
+    // against a lane that cannot call the model would turn three automatic
+    // triggers into data deletion. Short-circuit BEFORE the first fetch,
+    // with the readable reason /wiki distill surfaces.
+    const routeCfg = this.service.cfg
+    if ((routeCfg.distillProvider ?? '') === '' || (routeCfg.distillModel ?? '') === '') {
+      return {
+        ok: false,
+        reason: 'no-model',
+        created: [],
+        updated: [],
+        marked: 0,
+        detail: 'distill route not configured (set distill-provider and distill-model)',
+      }
+    }
     // Bounded batch loop (livelock fix): the pre-fix lane fed the whole
     // newest-40 undistilled window into one model call and failed the entire
     // run on a single output-limit overflow — nothing was ever marked, so
@@ -228,9 +250,14 @@ export class Distiller {
     let firstFetch = true
     let filteredTotal = 0
     let stallDetail: string | undefined
-    // GC bookkeeping (store.recordUnconsumed): every id actually fed to the
-    // model this run minus the ids an op consumed = one failed attempt per
-    // observation; three failed attempts delete it from the pool.
+    // GC bookkeeping (store.recordUnconsumed): every id the model EVALUATED
+    // this run (parseable answer, however useless) minus the ids an op
+    // consumed = one failed attempt per observation; three failed attempts
+    // delete it from the pool. Collection happens per-outcome in the loop
+    // below, not at fetch time: a batch whose call threw (model-error) or
+    // produced unparseable text (invalid-output) never counts, and neither
+    // does a shrink retry that has not been evaluated yet (BLOCKER-1: three
+    // ECONNREFUSED runs must not delete data the model never saw).
     const fedIds = new Set<string>()
     const consumedRunIds = new Set<string>()
     for (;;) {
@@ -246,10 +273,6 @@ export class Distiller {
         stopped = 'budget'
         break
       }
-      // The batch is about to be handed to the model: from here its
-      // observations are on the hook for a failed attempt if no op consumes
-      // them this run.
-      for (const o of observations) fedIds.add(o.id)
       // The batch spends 1 call, or 2 when the corrective observed_ids retry
       // fires — the budget check above already guaranteed room for both.
       const outcome = await this.runBatch(sessionId, observations, maxCalls - calls)
@@ -267,18 +290,32 @@ export class Distiller {
         failureDetail = outcome.detail
         if (this.batchSize > MIN_BATCH_SIZE) {
           this.batchSize = Math.max(MIN_BATCH_SIZE, Math.floor(this.batchSize / 2))
+          // Not evaluated yet: the same head is re-fed smaller below, and
+          // only the outcome that actually renders a verdict counts a GC
+          // attempt (a mid-shrink overflow is capacity, not a content
+          // judgment).
           continue // retry the smaller same-head batch — the livelock escape
         }
+        // Floor reached: repeated output-limit finishes ARE an evaluation
+        // verdict on this content (the model saw it and could not fit an
+        // answer) — the batch counts toward the GC.
+        for (const o of observations) fedIds.add(o.id)
         stopped = 'max-tokens'
         failureDetail = `批次无法再缩小（当前 ${this.batchSize} 条）仍触发输出上限：${outcome.detail ?? 'model finish: max-tokens'}`
         break
       }
       if (outcome.fatalReason !== undefined) {
+        // model-error (call threw) / invalid-output (unparseable text): the
+        // model never evaluated the content, so the batch gains NO GC
+        // attempt — three network blips must not delete the pool.
         stopped = 'failure'
         failureReason = outcome.fatalReason
         failureDetail = outcome.detail
         break
       }
+      // Parseable answer (ops, empty or not): the batch was genuinely
+      // evaluated — its unconsumed ids gain one failed attempt.
+      for (const o of observations) fedIds.add(o.id)
       if (outcome.noOps) {
         stopped = 'no-ops'
         break
@@ -758,7 +795,10 @@ function isMaxTokens(error: unknown): boolean {
  * ordered instance candidates — production passes the triggering session's
  * captured instance first, then the session-wide capture and the apply-time
  * root; the first one whose live routes prove the configured provider wins.
- * Returns undefined until the llm service and a configured route both exist.
+ * The configured-route gate is NOT here: `Distiller.runInner` checks the
+ * route per run (so `/wiki set distill-provider` stays live without a
+ * reload); this closure's own route check at call time is defense-in-depth
+ * for direct callers.
  *
  * Last-line guarantee: whatever host shape the candidates come from, a
  * `NO_ADAPTER` miss inside `stream()` is never recorded raw — it is rethrown

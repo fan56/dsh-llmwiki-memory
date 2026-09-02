@@ -14,7 +14,10 @@ function make(cfgOverrides = {}) {
     repo: '', autoInject: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
     matchThreshold: 0.3, tagBoost: 0.15, graphDepth: 2, recencyWindowDays: 7,
     autoObserve: true, observationMaxChars: 2000, distillEveryTurns: 20,
-    distillOnSessionEnd: true, distillProvider: '', distillModel: '', pushDebounceSeconds: 45,
+    distillOnSessionEnd: true,
+    // A configured route by default — the runInner route gate short-circuits
+    // empty-route lanes, and almost every test here exercises the lane.
+    distillProvider: 'p', distillModel: 'm', pushDebounceSeconds: 45,
     ...cfgOverrides,
   }
   const service = new WikiService(store, () => cfg)
@@ -817,6 +820,93 @@ test('distiller: consumed observations never accrue attempts; only the leftovers
     assert.equal(all.find((o) => o.id === left.id).attempts, 1)
     assert.deepEqual((await h.store.undistilledObservations()).map((o) => o.id), [left.id])
     assert.equal(r.gcDropped, undefined, 'one strike deletes nothing')
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ---- GC attempt semantics: only model-evaluated batches count (BLOCKER-1) ----
+
+test('distiller: infrastructure failures never count toward the gc three strikes', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await h.store.appendObservation({ kind: 'turn', source: 'auto', text: '网络抖动不该删我' })
+    const d = new Distiller(h.service, async () => {
+      throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), { code: 'ECONNREFUSED' })
+    })
+    for (let i = 0; i < 3; i += 1) {
+      const r = await d.run('s1')
+      assert.equal(r.ok, false)
+      assert.equal(r.reason, 'model-error')
+    }
+    const all = await h.store.allObservations()
+    assert.equal(all.length, 1, 'three failed runs left the pool intact — no data destroyed')
+    assert.equal(all[0].attempts, undefined, 'zero attempts accrued: the model never evaluated the batch')
+    assert.equal((await h.store.undistilledObservations()).length, 1)
+    assert.equal((await h.store.readDistillState())?.reason, 'model-error', 'the failure stays readable in the state file')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: unparseable output (invalid-output) never counts toward the gc either', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await h.store.appendObservation({ kind: 'turn', source: 'auto', text: 'x' })
+    const d = new Distiller(h.service, async () => '我觉得应该记点什么，但我不输出 JSON。')
+    for (let i = 0; i < 3; i += 1) {
+      const r = await d.run('s1')
+      assert.equal(r.reason, 'invalid-output')
+    }
+    const all = await h.store.allObservations()
+    assert.equal(all.length, 1, 'provider quirks that garble output are exempt from the strikes')
+    assert.equal(all[0].attempts, undefined)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: unconfigured route short-circuits before the lane — readable reason, zero attempts, zero calls', async () => {
+  const h = make({ distillProvider: '', distillModel: '' })
+  try {
+    await h.store.ensure()
+    await h.store.appendObservation({ kind: 'turn', source: 'auto', text: 'x' })
+    let calls = 0
+    const d = new Distiller(h.service, async () => {
+      calls += 1
+      return '{"ops":[]}'
+    })
+    assert.equal(d.configured, true, 'the caller seam exists; the ROUTE is what is missing')
+    for (let i = 0; i < 3; i += 1) {
+      const r = await d.run('s1')
+      assert.equal(r.reason, 'no-model')
+      assert.match(r.detail ?? '', /distill route not configured/)
+    }
+    assert.equal(calls, 0, 'the model was never invoked')
+    const all = await h.store.allObservations()
+    assert.equal(all.length, 1, 'triggers without a route never book GC attempts')
+    assert.equal(all[0].attempts, undefined)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('distiller: stalled batches (parseable ops, zero consumption) still count toward the gc', async () => {
+  const h = make()
+  try {
+    await h.store.ensure()
+    await appendObs(h.store, 2)
+    const d = new Distiller(h.service, async () =>
+      JSON.stringify({ ops: [{ op: 'create', title: '幻觉主题', conclusion: '结论', observed_ids: ['obs-hallucinated'] }] }),
+    )
+    await d.run('s1')
+    await d.run('s1')
+    const r3 = await d.run('s1')
+    assert.equal(r3.reason, 'stalled')
+    assert.equal(r3.gcDropped, 2, 'parseable-but-useless answers are real evaluations: the third strike deletes')
+    assert.equal((await h.store.allObservations()).length, 0, 'the exemption does not spare what should be deleted')
   } finally {
     h.cleanup()
   }
