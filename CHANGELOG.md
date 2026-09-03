@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+双通道注入改造（设计定稿 `docs/design/2026-09-03-dual-channel-injection-v4.md`，ADR 0014，amends 0004/0006/0011）：
+
+- **快道结构门 v0**：数字阈值改作用于 gateScore（剔除 recency），并要求结构证据——强字段（triggers/title/slug）任一命中，或 ≥2 个不同查询词命中正文；tags 不再是强字段。被门挡下的候选以 `gate-blocked` 进 near-misses。tag-boost 总上限 0.45→0.15（共享 tag 不再自行翻阈值，priming 主犯拆除）；recency 降为纯排序 tiebreaker。图扩展豁免结构门。`topic_search` 工具路径不受门限（显式召回优先）。
+- **triggers 字段**（OKF 可选 frontmatter）：检索权重最高（×5）、算强字段；distill 的 create ops 产出（prompt 已教）、`topic_save` 可直填、service 更新时保留既有值；旧 bundle 无此字段降级不命中。解析容错：非字符串项过滤而非抛错。
+- **pointer 注入形态**（默认）：每条 = `### title [status] (topics:slug score)` + description 一行（缺失回退结论首句），单条 ≤80 tok；总预算 = `min(total-budget, 600)`——旋钮可下调，上界锁 600。`inject-mode: digest` 保留完整旧渲染（300/1500）回退。零命中零注入、injectDedup、预算丢弃不进 registry 等纪律不变。
+- **`topic_open` 工具**：按 slug 拉全量结论/待决/建议，首部带 staleness 提示（快照于 generated.at）；调用流水写 `meta/opens.jsonl`，`/topics stats` 增「指针打开率」（opens/注入条目）。
+- **慢道质量 lane MVP**（`quality-lane: off | sampled | always`，默认 sampled 1/3）：`turn/end` 触发，数据源只有 observer 的 last-K ring buffer（K=3，深拷贝访问器）；两次串行 aux 调用（复用 distill 路由）——意图查询构建（verbatim priming 从根上消灭，粘贴内容记入 `stripped[]`）→ 词法候选带（关结构门，hits+near-misses）→ LLM 门禁重排放行 0-2 条带 why 行。pending 按 session 存放，下一个 steer message 的 spliced 与快道同预算合并注入，**消费即清**；TTL 10min、turn-lag ≤2、单调用 20s、管线 45s 硬界，过期记 `slow-expired-*`。生命周期：turn/end 产、下一 spliced 消、session/end-seed 与双 disposed 清、turn/start 不动 pending（ADR 0014 生命周期表）。子 agent 会话写死不跑（isDelegated 守卫，不挂 includeSubagents）；distill run in-flight 时让位；sessionLlm 捕获释放守卫纳入慢道 in-flight。
+- **shadow 重门**（log-only）：消费时对慢道 picks 按当前输入做词法结构门复判，只记录进 ilog `shadowVerdict` 不拦截（回指短句零强字段命中不被系统性误杀）；P3 数据回填后再议转正。
+- **ilog lane 字段族**：`lane: fast|slow|mixed`、`computedAt/consumedAt`（赶上率）、`shadowVerdict[]`、`queryBuild{rawChars,keptChars,stripped[]}`、`slowModel/slowMs`、`slow[]`；`/topics status` 增注入模式与慢道状态行，`/topics stats` 增慢道参与轮与赶上中位时延。
+- **doc-unreadable 记账**：命中但文件读不出（解析坏档）的 slug 此前会从 included 与 dropped 双账本消失（v4 设计 §2 疑点），现以 `dropped: [{slug, reason: 'doc-unreadable'}]` 入账。
+- **默认值变更**：`includeSubagents` 默认 true → false（ADR 0011 修订；显式配置不受影响）；新增 `inject-mode`（默认 pointer）与 `quality-lane`（默认 sampled）配置键。
+- **结构门回放标定**：`scripts/replay-structural-gate.mjs`（只读）遍历存量 injections.jsonl，从 reasons 重构门判定，输出逐条对照与 0.20–0.45 阈值扫描；存量 `tags:` 理由混合 slug+tags 不可拆，按弱字段保守处理。
+- ADR 0014 新增（五不变式 + pending 生命周期表 + 结构门/慢道/观测决定）；ADR 0004/0006/0011 标注修订。
+- 测试 207 → 238：结构门（强/弱字段、recency 界、图扩展豁免、工具路径）、pointer 渲染与预算 clamp、triggers round-trip 与容错、ring buffer K=3、慢道单元（守卫/消费即清/过期/去重/校验/错误遏制）、service 级合并（lane 字段族/shadow/dedup/混合轮）、index 级 wiring（turn/end 产 → 下一 spliced 消）。
+
 ## 0.6.0
 
 - 插件更名：`dsh-llmwiki-memory` → `dsh-topics-memory`（npm 包 `@aiwayds/dsh-llmwiki-memory` → `@aiwayds/dsh-topics-memory`；插件 id、git identity、蒸馏 purpose 标记、关系图标题等同步）。命令族 `/wiki` → `/topics`，settings namespace `llmwiki` → `topics`，数据目录 `~/.dsh/llmwiki` → `~/.dsh/topics`，覆盖环境变量 `DSH_LLMWIKI_HOME` → `DSH_TOPICS_HOME`。OKF 格式的 `[[wikilink]]` 语法与外部项目（zosmaai/pi-llm-wiki、chancelu/dsh-llmwiki 等）提及不受影响。

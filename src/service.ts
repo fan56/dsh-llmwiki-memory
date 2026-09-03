@@ -10,11 +10,11 @@ import { readFile, stat } from 'node:fs/promises'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import * as okf from './okf.ts'
-import { searchTopics, tokenize, type RetrievableTopic, type SearchOutcome } from './retrieval.ts'
-import { assembleInjection, type AssembleResult, type DigestInput } from './digest.ts'
+import { searchTopics, scoreTopic, passesGate, tokenize, type RetrievableTopic, type SearchOutcome } from './retrieval.ts'
+import { assembleInjection, assemblePointer, POINTER_PER_TOPIC, POINTER_TOTAL, type AssembleResult, type DigestInput, type SlowPointerInput } from './digest.ts'
 import type { BundleStore, Observation, SaveResult } from './store.ts'
 import type { TopicsConfigValue } from './config.ts'
-import { aggregateStats, querySample, type AggregateStats, type InjectionRecord } from './ilog.ts'
+import { aggregateStats, querySample, type AggregateStats, type InjectionRecord, type QueryBuildShape, type ShadowVerdict, type SlowItem } from './ilog.ts'
 import { fileHistory, fileAtRev } from './git.ts'
 import type { Sync } from './sync.ts'
 
@@ -30,6 +30,20 @@ export interface RetrieveOutcome {
   injection: AssembleResult
   /** Roster was empty or injection disabled — no record written for pure no-ops. */
   recorded: boolean
+}
+
+/**
+ * Slow-lane payload handed to the hot path at consumption time (v4 §4.2).
+ * `items` are the rerank picks (0-2, why lines included); metadata feeds the
+ * ilog lane field family. The hot path resolves titles, filters dedup,
+ * renders, and takes the log-only shadow verdicts.
+ */
+export interface SlowDelivery {
+  items: readonly { slug: string; why: string }[]
+  computedAt: string
+  queryBuild: QueryBuildShape
+  model: string
+  ms: number
 }
 
 export class TopicsService {
@@ -89,6 +103,7 @@ export class TopicsService {
         description: doc.fm.description,
         status: doc.fm.status,
         tags: doc.fm.tags,
+        triggers: doc.fm.triggers,
         depends: doc.fm.depends,
         links: okf.bodyLinkSlugs(doc.body),
         generatedAt: doc.fm.generated.at,
@@ -135,10 +150,13 @@ export class TopicsService {
       const doc = await this.readDoc(hit.slug)
       if (doc !== undefined) entries.push({ slug: hit.slug, doc, hit })
     }
-    const injection = assembleInjection(entries, {
-      perTopicBudget: cfg.perTopicBudget,
-      totalBudget: cfg.totalBudget,
-    })
+    const injection =
+      cfg.injectMode !== 'digest'
+        ? assemblePointer(entries, { perTopicBudget: POINTER_PER_TOPIC, totalBudget: Math.min(cfg.totalBudget, POINTER_TOTAL) })
+        : assembleInjection(entries, {
+            perTopicBudget: cfg.perTopicBudget,
+            totalBudget: cfg.totalBudget,
+          })
     const record: InjectionRecord = {
       at: new Date().toISOString(),
       queryTokenCount: tokenize(query).length,
@@ -163,18 +181,24 @@ export class TopicsService {
    * would always lose the race and inject nothing. Reads files with sync fs
    * behind the mtime cache; the log record is written fire-and-forget.
    *
-   * `dedup.exclude` (session-level injection dedup) filters hits AFTER
-   * retrieval and BEFORE assembly: excluded slugs are reported back as
-   * `deduped` (and logged as `record.deduped`), never packed. `included`
-   * mirrors what actually entered the context — only these may be marked
-   * as injected by the caller; budget-dropped slugs stay injectable later.
+   * `dedup.exclude` (session-level injection dedup) filters hits AND slow
+   * picks before assembly; excluded slugs are reported back as `deduped`
+   * (and logged as `record.deduped`), never packed. `included` mirrors the
+   * fast pointers that entered the context and `slowIncluded` the slow ones
+   * — only these may be marked as injected by the caller; budget-dropped
+   * slugs stay injectable later.
+   *
+   * `slow` (v4 §4.2) carries the consumed pending when one exists: picks are
+   * packed after the fast pointers under the same budget, take log-only
+   * shadow re-gate verdicts against the CURRENT query (B3: record, never
+   * block), and fill the record's lane field family.
    */
-  retrieveSync(query: string, sessionId?: string, dedup?: { exclude?: ReadonlySet<string> }): { text: string; outcome: SearchOutcome; deduped: string[]; included: string[] } {
+  retrieveSync(query: string, sessionId?: string, dedup?: { exclude?: ReadonlySet<string> }, slow?: SlowDelivery, slowExpired?: 'ttl' | 'turn-lag'): { text: string; outcome: SearchOutcome; deduped: string[]; included: string[]; slowIncluded: string[] } {
     const cfg = this.cfg
     const roster = this.rosterSync()
     const empty: SearchOutcome = { hits: [], nearMisses: [], rosterSize: roster.length }
     if (!cfg.autoInject || query.trim() === '' || roster.length === 0) {
-      return { text: '', outcome: empty, deduped: [], included: [] }
+      return { text: '', outcome: empty, deduped: [], included: [], slowIncluded: [] }
     }
     const conflicts = this.store.getConflictsSync()
     const outcome = searchTopics(query, roster, {
@@ -187,35 +211,151 @@ export class TopicsService {
     })
     const exclude = dedup?.exclude
     const deduped = exclude === undefined ? [] : outcome.hits.filter((h) => exclude.has(h.slug)).map((h) => h.slug)
+    const bySlug = new Map(roster.map((r) => [r.slug, r]))
     const entries: DigestInput[] = []
+    const unreadable: string[] = []
     for (const hit of outcome.hits) {
       if (exclude?.has(hit.slug)) continue
       const doc = this.readDocSync(hit.slug)
-      if (doc !== undefined) entries.push({ slug: hit.slug, doc, hit })
+      if (doc === undefined) {
+        // The hit has no readable doc — without this accounting it used to
+        // vanish from `included` AND `dropped` (v4 design §2 疑点).
+        unreadable.push(hit.slug)
+        continue
+      }
+      entries.push({ slug: hit.slug, doc, hit })
     }
-    const injection = assembleInjection(entries, {
-      perTopicBudget: cfg.perTopicBudget,
-      totalBudget: cfg.totalBudget,
-    })
+    // ---- Slow-lane merge (log-only shadow gate; consumption bookkeeping) ----
+    const slowPointers: SlowPointerInput[] = []
+    const slowDelivered: SlowItem[] = []
+    const shadow: ShadowVerdict[] = []
+    let slowIncluded: string[] = []
+    const consumedAt = new Date().toISOString()
+    if (slow !== undefined) {
+      const queryTokens = new Set(tokenize(query))
+      for (const item of slow.items) {
+        if (exclude?.has(item.slug)) {
+          if (!deduped.includes(item.slug)) deduped.push(item.slug)
+          continue
+        }
+        const meta = bySlug.get(item.slug)
+        if (meta === undefined) continue // vanished between production and consumption
+        const verdict = scoreTopic(queryTokens, meta, {
+          threshold: cfg.matchThreshold,
+          topK: cfg.topK,
+          tagBoost: cfg.tagBoost,
+          graphDepth: cfg.graphDepth,
+          recencyWindowDays: cfg.recencyWindowDays,
+          conflicts,
+          structuralGate: true,
+        })
+        shadow.push({
+          slug: item.slug,
+          pass: passesGate(verdict),
+          why: verdict.strong ? `strong:${verdict.reasons[0] ?? 'field'}` : `body-hits:${verdict.bodyHits}`,
+        })
+        slowPointers.push({
+          slug: item.slug,
+          title: meta.title,
+          status: meta.status,
+          description: meta.description,
+          why: item.why,
+        })
+      }
+    }
+    const pointerMode = cfg.injectMode !== 'digest'
+    // Pointer budget: per-entry fixed at the design's 80, total clamped to the
+    // fast-lane upper bound of 600 (I4) — totalBudget stays tunable downward.
+    const injection = pointerMode
+      ? assemblePointer(entries, { perTopicBudget: POINTER_PER_TOPIC, totalBudget: Math.min(cfg.totalBudget, POINTER_TOTAL) }, slowPointers)
+      : assembleInjection(entries, { perTopicBudget: cfg.perTopicBudget, totalBudget: cfg.totalBudget }, slowPointers)
+    slowIncluded = injection.slowIncluded ?? []
+    for (const pointer of slowPointers) {
+      if (slowIncluded.includes(pointer.slug)) slowDelivered.push({ slug: pointer.slug, why: pointer.why })
+    }
     const record: InjectionRecord = {
       at: new Date().toISOString(),
       queryTokenCount: tokenize(query).length,
       querySample: querySample(query),
       rosterSize: outcome.rosterSize,
-      hits: outcome.hits.map((h) => ({ slug: h.slug, score: h.score, reasons: h.reasons, viaGraph: h.viaGraph })),
+      hits: outcome.hits.map((h) => ({ slug: h.slug, score: h.score, reasons: h.reasons, viaGraph: h.viaGraph, strong: h.strong, bodyHits: h.bodyHits })),
       nearMisses: outcome.nearMisses.map((h) => ({ slug: h.slug, score: h.score })),
       injected: injection.text !== '',
       usedTokens: injection.usedTokens,
     }
     if (sessionId !== undefined) record.sessionId = sessionId
     if (deduped.length > 0) record.deduped = deduped
-    if (injection.text === '' && outcome.hits.length > 0) {
-      // All hits deduped is a different story than a budget squeeze — say so.
-      record.why = deduped.length === outcome.hits.length ? 'dedup' : 'below-budget-or-dropped'
+    if (unreadable.length > 0) {
+      record.dropped = [...(record.dropped ?? []), ...unreadable.map((slug) => ({ slug, reason: 'doc-unreadable' }))]
     }
-    if (injection.dropped.length > 0) record.dropped = injection.dropped
+    if (slow !== undefined) {
+      // The lane family records whenever a consumed pending produced picks to
+      // judge (delivered or budget-dropped) — shadow verdicts are evidence
+      // for the P3 「shadow 转正」 decision and must survive a budget squeeze.
+      if (slowDelivered.length > 0 || shadow.length > 0) {
+        record.computedAt = slow.computedAt
+        record.consumedAt = consumedAt
+        record.shadowVerdict = shadow
+        record.queryBuild = slow.queryBuild
+        record.slowModel = slow.model
+        record.slowMs = slow.ms
+        record.slow = slowDelivered
+      }
+      if (slowDelivered.length > 0) {
+        record.lane = injection.included.length > 0 ? 'mixed' : 'slow'
+      } else if (injection.included.length > 0) {
+        record.lane = 'fast'
+      }
+    }
+    if (injection.text === '' && (outcome.hits.length > 0 || slowPointers.length > 0)) {
+      // All hits deduped is a different story than a budget squeeze — say so.
+      record.why = deduped.length === outcome.hits.length && outcome.hits.length > 0 ? 'dedup' : 'below-budget-or-dropped'
+    } else if (injection.text === '' && slowExpired !== undefined) {
+      // The pending died at its hard bounds (TTL / turn-lag) without ever
+      // being delivered — the denominator the 赶上率 needs (v4 B4).
+      record.why = `slow-expired-${slowExpired}`
+    }
+    if (slowExpired !== undefined && injection.text === '') record.lane = 'slow'
+    if (injection.dropped.length > 0) record.dropped = [...(record.dropped ?? []), ...injection.dropped]
     void this.store.appendInjectionRecord(record).catch(() => undefined)
-    return { text: injection.text, outcome, deduped, included: injection.included }
+    return { text: injection.text, outcome, deduped, included: injection.included, slowIncluded }
+  }
+
+  /**
+   * topic_open tool path (v4 §4.1): full conclusion / open questions /
+   * recommendations plus the staleness notice timestamp (fm.generated.at —
+   * the store stamps it on every write, so it IS the last-updated instant).
+   * Logs an open record for the pointer-open-rate stat.
+   */
+  async openTopic(slug: string, sessionId?: string): Promise<{
+    found: boolean
+    slug: string
+    title?: string
+    status?: okf.TopicStatus
+    updatedAt?: string
+    description?: string
+    conclusion?: string
+    openQuestions?: string[]
+    recommendations?: string
+  }> {
+    const doc = await this.store.readTopic(slug).catch(() => undefined)
+    if (doc === undefined) return { found: false, slug }
+    // Awaited (tool path, not hot): a settled write makes the pointer-open
+    // stat reliable; a failed log write must not fail the tool.
+    await this.store
+      .appendOpenRecord({ slug, at: new Date().toISOString(), ...(sessionId !== undefined ? { sessionId } : {}) })
+      .catch(() => undefined)
+    return {
+      found: true,
+      slug,
+      title: doc.fm.title,
+      status: doc.fm.status,
+      updatedAt: doc.fm.generated.at,
+      description: doc.fm.description,
+      conclusion: okf.sectionOf(doc.body, okf.CONCLUSION_HEADING) ?? '',
+      openQuestions: doc.fm.open_questions,
+      recommendations: okf.sectionOf(doc.body, okf.RECOMMENDATIONS_HEADING) ?? '',
+    }
   }
 
   /** Sync roster read (same mtime cache as roster()). */
@@ -256,6 +396,7 @@ export class TopicsService {
         description: doc.fm.description,
         status: doc.fm.status,
         tags: doc.fm.tags,
+        triggers: doc.fm.triggers,
         depends: doc.fm.depends,
         links: okf.bodyLinkSlugs(doc.body),
         generatedAt: doc.fm.generated.at,
@@ -286,6 +427,7 @@ export class TopicsService {
     title: string
     description?: string
     tags?: string[]
+    triggers?: string[]
     depends?: string[]
     openQuestions?: string[]
     impact?: string[]
@@ -320,6 +462,10 @@ export class TopicsService {
       generated: existing?.fm.generated ?? { by: 'pending', at: now },
     }
     if (input.description !== undefined && input.description !== '') fm.description = input.description
+    // Triggers pass through on create; on update the caller's value wins, else
+    // the stored list survives (same preserve-on-update semantics as tags).
+    const triggers = sanitizeTriggers(input.triggers ?? existing?.fm.triggers ?? [])
+    if (triggers.length > 0) fm.triggers = triggers
     if (existing !== undefined && existing.fm.verified !== undefined) fm.verified = existing.fm.verified
     const result = await this.store.saveTopic(
       { slug, doc: { fm, body } },
@@ -342,6 +488,9 @@ export class TopicsService {
       tagBoost: cfg.tagBoost,
       graphDepth: cfg.graphDepth,
       recencyWindowDays: cfg.recencyWindowDays,
+      // Explicit tool: the model asked for recall, so the injection-only
+      // structural gate must not hide results.
+      structuralGate: false,
       conflicts: await this.store.getConflicts(),
     })
   }
@@ -394,6 +543,17 @@ function dedupeLower(tags: string[]): string[] {
     const key = t.trim().toLowerCase()
     if (key === '' || seen.has(key)) continue
     seen.add(key)
+    out.push(key)
+  }
+  return out
+}
+
+function sanitizeTriggers(triggers: readonly string[]): string[] {
+  const out: string[] = []
+  for (const t of triggers) {
+    if (typeof t !== 'string') continue
+    const key = t.trim()
+    if (key === '') continue
     out.push(key)
   }
   return out

@@ -170,3 +170,54 @@ test('renderIndex: sorted, status, links', () => {
   assert.ok(idxA > 0 && idxZ > idxA)
   assert.match(md, /topics\/a-topic\.md/)
 })
+
+// ---------------------------------------------------------------------------
+// v4 triggers frontmatter (optional, degrade-not-throw)
+// ---------------------------------------------------------------------------
+
+test('triggers: round-trips through parse and serialize', () => {
+  const raw = `---
+type: Topic
+title: 发版流程
+tags: [release]
+triggers: ["发版", "打tag", "release"]
+depends: []
+open_questions: []
+impact: []
+status: draft
+generated: { by: x, at: 2026-08-31T00:00:00Z }
+---
+
+# Conclusion
+
+tag 触发发版。
+`
+  const doc = parseTopicDoc(raw)
+  assert.deepEqual(doc.fm.triggers, ['发版', '打tag', 'release'])
+  const back = parseTopicDoc(serializeTopicDoc(doc))
+  assert.deepEqual(back.fm.triggers, ['发版', '打tag', 'release'])
+})
+
+test('triggers: absent, malformed, or empty degrade to undefined without throwing', () => {
+  const base = (triggers) => `---
+type: Topic
+title: t
+tags: []
+${triggers}
+depends: []
+open_questions: []
+impact: []
+status: draft
+generated: { by: x, at: 2026-08-31T00:00:00Z }
+---
+
+# Conclusion
+
+c
+`
+  assert.equal(parseTopicDoc(base('')).fm.triggers, undefined)
+  assert.equal(parseTopicDoc(base('triggers: [1, 2, null]\n')).fm.triggers, undefined)
+  assert.equal(parseTopicDoc(base('triggers: ["", "  "]\n')).fm.triggers, undefined)
+  // scalar string is rescued into a one-element list
+  assert.deepEqual(parseTopicDoc(base('triggers: 发版\n')).fm.triggers, ['发版'])
+})

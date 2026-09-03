@@ -20,6 +20,8 @@ export interface RetrievableTopic extends TopicMeta {
   conclusion: string
   /** Body-referenced topic slugs ([[wikilinks]] + markdown links) — graph edges. */
   links?: string[]
+  /** Self-declared recall triggers (v4 structural gate strong field). */
+  triggers?: string[]
 }
 
 export interface RetrievalConfig {
@@ -31,6 +33,13 @@ export interface RetrievalConfig {
   now?: Date
   /** Slugs currently conflicted — demoted, not dropped. */
   conflicts?: ReadonlySet<string>
+  /**
+   * v4 structural gate v0 (design §4.1): a threshold-passing candidate only
+   * injects when it ALSO hits a strong field (triggers/title/slug) or ≥2
+   * distinct body terms — tags alone and single body terms can no longer
+   * self-cross. Off for the explicit topic_search tool (the model asked).
+   */
+  structuralGate: boolean
 }
 
 export const DEFAULT_RETRIEVAL: RetrievalConfig = {
@@ -39,13 +48,20 @@ export const DEFAULT_RETRIEVAL: RetrievalConfig = {
   tagBoost: 0.15,
   graphDepth: 2,
   recencyWindowDays: 7,
+  structuralGate: true,
 }
+
+/** Trigger hits outrank every other lexical field (pi-llm-wiki: highest weight). */
+export const TRIGGER_WEIGHT = 5
 
 export interface SearchHit {
   slug: string
   score: number
   reasons: string[]
   viaGraph: boolean
+  /** Structural gate v0 evidence (absent on graph-expanded entries). */
+  strong?: boolean
+  bodyHits?: number
 }
 
 export interface SearchOutcome {
@@ -93,6 +109,12 @@ export interface ScoredTopic {
   slug: string
   score: number
   reasons: string[]
+  /** Strong-field hit (triggers/title/slug) — gate v0 pass condition A. */
+  strong: boolean
+  /** Distinct query terms found in description ∪ conclusion — pass condition B is ≥2. */
+  bodyHits: number
+  /** Score with the recency tiebreaker removed — the only score the gate looks at. */
+  gateScore: number
 }
 
 /** Score one topic against the query tokens. */
@@ -103,21 +125,35 @@ export function scoreTopic(
 ): ScoredTopic {
   const title = new Set(tokenize(topic.title))
   const slug = new Set(tokenize(topic.slug))
+  const triggers = new Set((topic.triggers ?? []).flatMap((t) => tokenize(t)))
   const tags = new Set(topic.tags.flatMap((t) => tokenize(t)))
   const description = new Set(tokenize(topic.description ?? ''))
   const conclusion = new Set(tokenize(topic.conclusion))
   const reasons: string[] = []
   let score = 0
 
+  const cTriggers = containment(queryTokens, triggers)
+  if (cTriggers > 0) {
+    score += TRIGGER_WEIGHT * cTriggers
+    reasons.push(`triggers:${cTriggers.toFixed(2)}`)
+  }
   const cTitle = containment(queryTokens, title)
   if (cTitle > 0) {
     score += 3 * cTitle
     reasons.push(`title:${cTitle.toFixed(2)}`)
   }
-  const cTag = containment(queryTokens, new Set([...tags, ...slug]))
-  if (cTag > 0) {
-    score += 2 * cTag
-    reasons.push(`tags:${cTag.toFixed(2)}`)
+  // Slug and tags are scored separately since the structural gate (v4): the
+  // slug is a strong field, tags are not. Weights unchanged (2) so historical
+  // score distributions stay comparable.
+  const cSlug = containment(queryTokens, slug)
+  if (cSlug > 0) {
+    score += 2 * cSlug
+    reasons.push(`slug:${cSlug.toFixed(2)}`)
+  }
+  const cTags = containment(queryTokens, tags)
+  if (cTags > 0) {
+    score += 2 * cTags
+    reasons.push(`tags:${cTags.toFixed(2)}`)
   }
   const cDesc = containment(queryTokens, description)
   if (cDesc > 0) {
@@ -129,25 +165,28 @@ export function scoreTopic(
     score += 0.8 * cConc
     reasons.push(`conclusion:${cConc.toFixed(2)}`)
   }
-  // Exact tag hit boost, additive and capped (pi-topic-memory lesson: add,
-  // never fold into the token set — dilution breaks the guard).
+  // Exact tag hit boost, additive and capped at ONE boost's worth (v4 design:
+  // the old ×3 cap let shared tags mint a 0.45 floor — the priming main
+  // culprit). Never folded into the token set (dilution breaks the guard).
   let tagHits = 0
   for (const t of tags) {
     if (overlap(queryTokens, new Set([...tokenize(t)]))) tagHits += 1
   }
   if (tagHits > 0) {
-    const boost = Math.min(cfg.tagBoost * tagHits, cfg.tagBoost * 3)
+    const boost = Math.min(cfg.tagBoost * tagHits, cfg.tagBoost)
     score += boost
     reasons.push(`tag-boost:+${boost.toFixed(2)}`)
   }
-  // Recency is a tiebreaker among relevant topics, never a free pass: only
-  // fires when the query already matched some content above.
+  // Recency is a RANKING tiebreaker only (v4): it pads `score` but is kept
+  // out of `gateScore`, so it can never carry a candidate across the numeric
+  // threshold. Conflict demotion applies to the pre-tiebreaker score.
+  let recencyBonus = 0
   if (score > 0 && cfg.recencyWindowDays > 0) {
     const generated = Date.parse(topic.generatedAt)
     if (!Number.isNaN(generated)) {
       const ageDays = ((cfg.now?.getTime() ?? Date.now()) - generated) / 86_400_000
       if (ageDays >= 0 && ageDays <= cfg.recencyWindowDays) {
-        score += 0.2
+        recencyBonus = 0.2
         reasons.push('recency')
       }
     }
@@ -156,13 +195,36 @@ export function scoreTopic(
     score *= 0.3
     reasons.push('conflicted-demoted')
   }
-  return { slug: topic.slug, score: Math.round(score * 1000) / 1000, reasons }
+  const gateScore = score
+  score += recencyBonus
+  const bodySet = new Set([...description, ...conclusion])
+  let bodyHits = 0
+  for (const t of queryTokens) if (bodySet.has(t)) bodyHits += 1
+  const strong = cTriggers > 0 || cTitle > 0 || cSlug > 0
+  return {
+    slug: topic.slug,
+    score: Math.round(score * 1000) / 1000,
+    reasons,
+    strong,
+    bodyHits,
+    gateScore: Math.round(gateScore * 1000) / 1000,
+  }
+}
+
+/** Structural gate v0 verdict: strong-field hit, or ≥2 distinct body terms. */
+export function passesGate(s: { strong: boolean; bodyHits: number }): boolean {
+  return s.strong || s.bodyHits >= 2
 }
 
 /**
- * Search the roster: score every topic, split hits from near-misses, then
- * expand seeds through the `depends` graph (both directions, geometric decay,
- * depth ≤ cfg.graphDepth). Expanded entries enter at the back of the hits.
+ * Search the roster: score every topic, apply the numeric threshold to the
+ * gate score (recency excluded), split by the structural gate, then expand
+ * gate-passed seeds through the `depends` graph (both directions, geometric
+ * decay, depth ≤ cfg.graphDepth). Expanded entries enter at the back of the
+ * hits and are exempt from the structural gate — they carry no lexical
+ * evidence by design, only graph adjacency. Threshold-passing candidates the
+ * gate rejects lead the near-misses (reason `gate-blocked`) so the replay
+ * evidence shows what the gate is costing.
  */
 export function searchTopics(query: string, roster: readonly RetrievableTopic[], cfg: Partial<RetrievalConfig> = {}): SearchOutcome {
   const c: RetrievalConfig = { ...DEFAULT_RETRIEVAL, ...cfg }
@@ -171,10 +233,18 @@ export function searchTopics(query: string, roster: readonly RetrievableTopic[],
     return { hits: [], nearMisses: [], rosterSize: roster.length }
   }
   const scored = roster.map((t) => scoreTopic(queryTokens, t, c)).sort((a, b) => b.score - a.score)
-  const direct = scored.filter((s) => s.score >= c.threshold).slice(0, c.topK)
-  const near = scored.filter((s) => s.score < c.threshold && s.score >= c.threshold * 0.5).slice(0, 8)
+  const passing = scored.filter((s) => s.gateScore >= c.threshold)
+  const directHits = passing.filter((s) => !c.structuralGate || passesGate(s)).slice(0, c.topK)
+  const gateBlocked = c.structuralGate
+    ? passing.filter((s) => !passesGate(s)).slice(0, c.topK)
+    : []
+  const nearFloor = scored.filter((s) => s.gateScore < c.threshold && s.gateScore >= c.threshold * 0.5).slice(0, 8)
 
-  const hits: SearchHit[] = direct.map((s) => ({ ...s, viaGraph: false }))
+  const hits: SearchHit[] = directHits.map((s) => ({ ...s, viaGraph: false }))
+  const nearMisses: SearchHit[] = [
+    ...gateBlocked.map((s) => ({ ...s, reasons: [...s.reasons, 'gate-blocked'], viaGraph: false })),
+    ...nearFloor.map((s) => ({ ...s, viaGraph: false })),
+  ].slice(0, 8)
   // Graph expansion (ADR 0005 graph-shaped bundle): walk depends + body
   // links, both directions, from the seeds; include up to topK+2 slots at
   // decaying score.
@@ -215,5 +285,5 @@ export function searchTopics(query: string, roster: readonly RetrievableTopic[],
       frontier = next
     }
   }
-  return { hits, nearMisses: near.map((s) => ({ ...s, viaGraph: false })), rosterSize: roster.length }
+  return { hits, nearMisses, rosterSize: roster.length }
 }

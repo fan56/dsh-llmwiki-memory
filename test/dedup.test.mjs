@@ -218,8 +218,11 @@ test('dedup: session end clears the registry — same topic injects again', asyn
   }
 })
 
-test('dedup: total-budget-dropped slugs never enter the registry', async () => {
-  const overrides = { totalBudget: 120 }
+test('dedup: total-budget-dropped slugs never enter the registry (digest mode)', async () => {
+  // Legacy digest arithmetic: fat open-questions keep B's digest permanently
+  // over a tiny budget. Pointer mode has its own variant below (small blocks,
+  // tighter budget).
+  const overrides = { totalBudget: 120, injectMode: 'digest' }
   const h = bootPlugin(overrides)
   try {
     const store = await seedTopics(h.root, [TOPIC_A, LONG_B])
@@ -254,6 +257,55 @@ test('dedup: total-budget-dropped slugs never enter the registry', async () => {
     assert.notEqual(r3, undefined)
     assert.deepEqual(r3.deduped, [SLUG_A])
     assert.equal(r3.dropped, undefined)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('dedup: pointer mode budget drop keeps the same registry discipline', async () => {
+  // Pointer blocks are small, so the squeeze comes from the clamp
+  // (min(totalBudget, 600)): at 78 the wrapper + one pointer fit, the second
+  // does not (its slice of the budget falls under the 24 floor). A and B
+  // score identically, so WHICH one fits follows roster order — the test is
+  // order-agnostic and pins the CONTRACT instead: dropped slugs stay
+  // injectable, included slugs are deduped.
+  const overrides = { totalBudget: 78 }
+  const h = bootPlugin(overrides)
+  try {
+    const store = await seedTopics(h.root, [TOPIC_A, TOPIC_B])
+    h.claim('s1', QUERY_AB)
+    const t1 = h.injectedText('s1')
+    const aIn = t1.includes('Echo Marker QX7QZ')
+    const bIn = t1.includes('Bravo Noodle W8R3')
+    assert.ok(aIn !== bIn, `exactly one pointer fits at budget 78 (a=${aIn} b=${bIn})`)
+    const injectedSlug = aIn ? SLUG_A : SLUG_B
+    const injectedTitle = aIn ? 'Echo Marker QX7QZ' : 'Bravo Noodle W8R3'
+    const droppedSlug = aIn ? SLUG_B : SLUG_A
+    const droppedTitle = aIn ? 'Bravo Noodle W8R3' : 'Echo Marker QX7QZ'
+    const records1 = await readRecords(store, 1)
+    assert.deepEqual(records1[0].dropped, [{ slug: droppedSlug, reason: 'total-budget' }])
+    // Round 2: the injected one deduped, which frees exactly enough room for
+    // the dropped one at the same budget (pointer blocks are small — unlike
+    // the digest variant, the squeeze is per-round, not permanent).
+    h.claim('s1', QUERY_AB)
+    assert.match(h.injectedText('s1'), new RegExp(droppedTitle))
+    const records2 = await readRecords(store, 2)
+    // Both rounds inject — identify round 2 by its dedup mark (appends race).
+    const r2 = records2.find((r) => r.injected && r.deduped !== undefined)
+    assert.notEqual(r2, undefined)
+    assert.deepEqual(r2.deduped, [injectedSlug])
+    assert.equal(r2.dropped, undefined)
+    // Round 3: both are in the registry now — raising the budget (clamped to
+    // 600, plenty for both pointers) must NOT resurrect them. Budget drops
+    // stay injectable; registry marks do not expire with the session.
+    overrides.totalBudget = 4000
+    h.claim('s1', QUERY_AB)
+    assert.equal(h.injectedText('s1'), '')
+    const records3 = await readRecords(store, 3)
+    const r3 = records3.find((r) => !r.injected)
+    assert.notEqual(r3, undefined)
+    assert.equal(r3.why, 'dedup')
+    assert.deepEqual([...r3.deduped].sort(), [SLUG_A, SLUG_B].sort())
   } finally {
     h.cleanup()
   }

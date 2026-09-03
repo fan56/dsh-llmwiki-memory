@@ -1,6 +1,6 @@
 # Injection 行为默认值
 
-Status: accepted
+Status: accepted（2026-09-03 由 ADR 0014 修订：注入形态默认翻为 pointer 指针视图（≤600 tok，结构门 v0 把关），digest 摘要视图保留为 `inject-mode: digest` 回退；慢道注入见 ADR 0014）
 
 1. 每轮输入都检索；无命中零注入，绝不注入凑数内容。
 2. 注入 per-topic 摘要而非全文：`title + status + 结论精句 + 未决问题 + 建议`；单 Topic ≤300 token，top-K ≤4，总预算 ≤1.5k token，全部可配。

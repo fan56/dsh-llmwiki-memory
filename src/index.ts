@@ -30,6 +30,8 @@ import { buildTopicTools } from './tools.ts'
 import { buildTopicsCommand } from './commands.ts'
 import { Observer, textOf, type UserMessageLike } from './observer.ts'
 import { Distiller, defaultModelCaller, type DistillResult, type LlmCandidateShape } from './distill.ts'
+import { SlowLane } from './quality.ts'
+import type { SlowDelivery } from './service.ts'
 import { CONFIG_KEYS, TopicsConfig, type TopicsConfigValue } from './config.ts'
 import type { AskServiceResolver, AskServiceShape, LlmDirectoryResolver, LlmDirectoryShape } from './onboard.ts'
 import { isDelegated } from './delegation.ts'
@@ -240,22 +242,64 @@ export function apply(ctx: Context): void {
     try {
       const state = turns.get(sessionId)
       if (state === undefined) return
-      const dedup = cfgNow().injectDedup
-      const seen = dedup ? injectedBySession.get(sessionId) : undefined
-      const r = service.retrieveSync(query, sessionId, seen === undefined ? undefined : { exclude: seen })
-      // Mark only what entered the context this round (hits → dedup filter →
-      // assemble → registry mark; budget-dropped slugs stay injectable).
-      if (dedup && r.included.length > 0) {
+      const cfg = cfgNow()
+      const seen = cfg.injectDedup ? injectedBySession.get(sessionId) : undefined
+      // Slow-lane consumption point (v4 生命周期表): the pending produced at
+      // the previous turn/end rides THIS splice — consumed or expired, the
+      // slot is gone either way (消费即清; expiry surfaces in record.why).
+      let slow: SlowDelivery | undefined
+      let slowExpired: 'ttl' | 'turn-lag' | undefined
+      if (cfg.autoInject) {
+        const consumed = slowLane.consume(sessionId, observer.turnCountOf(sessionId))
+        if (consumed !== undefined) {
+          if ('pending' in consumed) slow = consumed.pending
+          else slowExpired = consumed.expired
+        }
+      }
+      const r = service.retrieveSync(query, sessionId, seen === undefined ? undefined : { exclude: seen }, slow, slowExpired)
+      // Mark only what entered the context this round (hits AND slow picks →
+      // dedup filter → assemble → registry mark; budget-dropped slugs stay
+      // injectable).
+      if (cfg.injectDedup && (r.included.length > 0 || r.slowIncluded.length > 0)) {
         let marked = injectedBySession.get(sessionId)
         if (marked === undefined) {
           marked = new Set<string>()
           injectedBySession.set(sessionId, marked)
         }
         for (const slug of r.included) marked.add(slug)
+        for (const slug of r.slowIncluded) marked.add(slug)
       }
       state.injectionText = r.text
     } catch {
       // Contained: a retrieval failure must never break the turn.
+    }
+  }
+
+  /**
+   * Slow-lane production trigger at turn/end (v4 §4.2). Host-side gates live
+   * here: subagent sessions never run the lane (hard guard, independent of
+   * includeSubagents) and a distill run in flight makes the lane yield (the
+   * every-N-turns distill cadence shares this trigger).
+   */
+  function dispatchSlowLane(sessionId: string): void {
+    try {
+      if (isDelegated(agents()?.get(sessionId))) return
+      if (distiller.hasPending(sessionId)) return
+      // Same trigger-time capture the distill trigger uses: the agent's
+      // scoped llm is alive NOW, and the lane's caller reads the captured
+      // entry lazily inside its async pipeline (released via the
+      // slowLane-aware guards once the pipeline settles).
+      try {
+        captureFromAgent(agents()?.get(sessionId))
+      } catch {
+        // contained — the captured instance, if any, still walks the chain
+      }
+      slowLane.dispatch(sessionId, {
+        ring: observer.recentTurns(sessionId),
+        turnId: observer.turnCountOf(sessionId),
+      })
+    } catch {
+      // contained — the lane must never break the event handler
     }
   }
 
@@ -302,6 +346,9 @@ export function apply(ctx: Context): void {
     },
   )
   const distiller = new Distiller(service, caller)
+  // Slow quality lane (v4 §4.2): shares the distill caller/route; owns its
+  // own pending lifecycle (produce at turn/end, consume at the next splice).
+  const slowLane = new SlowLane(service, caller)
 
   // ---- Observer (M2) ----
   // The process-exit disposer awaits this run (bounded): the callback below
@@ -326,7 +373,7 @@ export function apply(ctx: Context): void {
       if (sessionId === 'dispose') exitDistill = run
       void run
         .finally(() => {
-          if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
+          if (!distiller.hasPending(sessionId) && !slowLane.hasInFlight(sessionId)) sessionLlm.delete(sessionId)
         })
         .catch(() => undefined)
     }
@@ -405,8 +452,15 @@ export function apply(ctx: Context): void {
         // Restore/resume boundary: the persisted context is being replayed — a
         // fresh process has no dedup registry, so allow re-injection.
         injectedBySession.delete(sessionId)
+        slowLane.clear(sessionId)
       }
       observer.onSessionEvent(sessionId, event.type, event.data)
+      // AFTER the observer processed the turn (turnCount already bumped, so
+      // the pending stamps the correct turn id; the every-N distill trigger
+      // has already claimed its cadence slot — the lane yields to it inside
+      // dispatchSlowLane). The turns-map lifecycle above never touches the
+      // lane's pending map — the two coexist by design (v4 生命周期表).
+      if (event.type === 'turn/end') dispatchSlowLane(sessionId)
     }) as never,
   )
 
@@ -432,11 +486,12 @@ export function apply(ctx: Context): void {
       captureFromAgent((subject as { agent?: unknown }).agent)
       observer.onSessionEvent(sessionId, name, undefined)
       injectedBySession.delete(sessionId)
+      slowLane.clear(sessionId)
       // A teardown-triggered run (session-end distill) reads the payload
       // capture lazily: drop the entry here only when no run can still read
-      // it. A pending run removes it on settle; a session that ends without
-      // any run must not leak its capture (long-running host process).
-      if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
+      // it. The slow lane's in-flight pipeline reads it too (shared caller),
+      // so it holds the entry open the same way (v4 §4.2 守卫).
+      if (!distiller.hasPending(sessionId) && !slowLane.hasInFlight(sessionId)) sessionLlm.delete(sessionId)
     }) as never)
   }
 
@@ -559,10 +614,12 @@ const DEFAULTS: TopicsConfigValue = {
   totalBudget: 1500,
   matchThreshold: 0.3,
   tagBoost: 0.15,
+  injectMode: 'pointer',
+  qualityLane: 'sampled',
   graphDepth: 2,
   recencyWindowDays: 7,
   autoObserve: true,
-  includeSubagents: true,
+  includeSubagents: false,
   observationMaxChars: 2000,
   distillEveryTurns: 5,
   distillOnSessionEnd: true,

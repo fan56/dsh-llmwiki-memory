@@ -28,6 +28,7 @@ export function buildTopicTools(service: TopicsService) {
       conclusion: { type: 'string', required: true, description: 'The current best conclusion, self-contained markdown prose' },
       description: { type: 'string', description: 'One-line summary for indexes and snippets' },
       tags: { ...STRING_ARRAY, description: 'Cross-cutting tags (project, domain, component); lowercased on save' },
+      triggers: { ...STRING_ARRAY, description: 'Short recall phrases that should bring this topic back (specific nouns/terms, no generic words)' },
       depends: { ...STRING_ARRAY, description: 'Slugs of prerequisite topics (topics this one builds on)' },
       open_questions: { ...STRING_ARRAY, description: 'Unresolved questions this topic still carries' },
       impact: { ...STRING_ARRAY, description: 'What this conclusion affects: topics, projects, decisions' },
@@ -59,6 +60,7 @@ export function buildTopicTools(service: TopicsService) {
         conclusion: args.conclusion,
         description: args.description,
         tags: args.tags,
+        triggers: args.triggers,
         depends: args.depends,
         openQuestions: args.open_questions,
         impact: args.impact,
@@ -68,6 +70,54 @@ export function buildTopicTools(service: TopicsService) {
         source: 'model',
       })
       return { slug: result.slug, path: result.path, created: result.created, committed: result.committed }
+    },
+  })
+
+  const topicOpen = defineTool({
+    name: 'topic_open',
+    description:
+      'Open one topic from the long-term memory in full: conclusion, open questions, recommendations, ' +
+      'plus a staleness notice. Use when a <topic-memory> pointer (or a search hit) is actually relevant — ' +
+      'pointers are one-line hints; this fetches the real content.',
+    parameters: {
+      slug: { type: 'string', required: true, description: 'Topic slug (from a pointer or topic_search)' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          found: { type: 'boolean', required: true },
+          slug: { type: 'string', required: true },
+          title: { type: 'string' },
+          status: { type: 'string' },
+          updatedAt: { type: 'string' },
+          description: { type: 'string' },
+          conclusion: { type: 'string' },
+          openQuestions: { type: 'array', items: { type: 'string' } },
+          recommendations: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [
+        {
+          type: 'text' as const,
+          text: !value.found
+            ? `Topic \`${value.slug}\` 不存在（可能已合并或改名；用 topic_search 找）。`
+            : [
+                `快照于 ${value.updatedAt}，代码事实以源码为准。`,
+                `### ${value.title} [${value.status}] (topics:${value.slug})`,
+                value.description ?? '',
+                value.conclusion !== '' ? `# Conclusion\n\n${value.conclusion}` : '',
+                value.openQuestions !== undefined && value.openQuestions.length > 0 ? `待决: ${value.openQuestions.join('；')}` : '',
+                value.recommendations !== '' ? `# Recommendations\n\n${value.recommendations}` : '',
+              ]
+                .filter((l) => l !== '')
+                .join('\n\n'),
+        },
+      ],
+    },
+    async execute(args) {
+      return await service.openTopic(args.slug)
     },
   })
 
@@ -215,7 +265,7 @@ export function buildTopicTools(service: TopicsService) {
     },
   })
 
-  return [topicSave, topicSearch, topicObserve, topicHistory]
+  return [topicSave, topicOpen, topicSearch, topicObserve, topicHistory]
 }
 
 function extractConclusion(body: string): string {

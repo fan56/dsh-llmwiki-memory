@@ -22,16 +22,22 @@ export const TopicsConfig = z.object({
   totalBudget: z.number().default(1500),
   /** Retrieval score threshold — tune via /topics stats near-miss evidence. */
   matchThreshold: z.number().default(0.3),
-  /** Additive boost per tag hit. */
+  /** Additive boost per tag hit (v4: total cap = this value, was ×3). */
   tagBoost: z.number().default(0.15),
+  /** Injection shape: pointer (default, ≤600 tok) keeps the legacy digest view. */
+  injectMode: z.string().default('pointer'),
+  /** Slow quality lane (v4 §4.2): off | sampled (1/3 of turns) | always. */
+  qualityLane: z.string().default('sampled'),
   /** depends-graph expansion depth (0 disables). */
   graphDepth: z.number().default(2),
   /** Days within which a topic counts as recent (+0.2). */
   recencyWindowDays: z.number().default(7),
   /** Capture each turn's user/assistant text as raw observations (M2). */
   autoObserve: z.boolean().default(true),
-  /** Whether injection and observation also engage delegated subagent sessions (ADR 0011). */
-  includeSubagents: z.boolean().default(true),
+  /** Whether injection and observation also engage delegated subagent sessions (ADR 0011).
+   *  v4 default flipped to false: one-shot subagent turns diluted the pool.
+   *  The slow quality lane never runs for subagents either way (hard guard). */
+  includeSubagents: z.boolean().default(false),
   /** Max auto-captured chars per side (user/assistant) per turn. */
   observationMaxChars: z.number().default(2000),
   /** Background distill cadence: every N turns of a long session. */
@@ -60,6 +66,8 @@ export type TopicsConfigValue = {
   totalBudget: number
   matchThreshold: number
   tagBoost: number
+  injectMode: string
+  qualityLane: string
   graphDepth: number
   recencyWindowDays: number
   autoObserve: boolean
@@ -83,6 +91,8 @@ export const CONFIG_KEYS = [
   'totalBudget',
   'matchThreshold',
   'tagBoost',
+  'injectMode',
+  'qualityLane',
   'graphDepth',
   'recencyWindowDays',
   'autoObserve',
@@ -135,6 +145,14 @@ export function parseConfigValue(key: ConfigKey, raw: string): boolean | number 
       const n = Number(raw)
       if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return { error: `${key} 需要非负整数` }
       return n
+    }
+    case 'injectMode': {
+      if (raw === 'pointer' || raw === 'digest') return raw
+      return { error: 'inject-mode 取值 pointer|digest' }
+    }
+    case 'qualityLane': {
+      if (raw === 'off' || raw === 'sampled' || raw === 'always') return raw
+      return { error: 'quality-lane 取值 off|sampled|always' }
     }
     case 'matchThreshold':
     case 'tagBoost': {

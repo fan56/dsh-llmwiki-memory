@@ -494,6 +494,59 @@ export class BundleStore {
   }
 
   // ------------------------------------------------------------------
+  // Pointer-open log (v4 §4.3) — one line per topic_open call; feeds the
+  // 「指针打开率」 stat. Features only (slug/time), never conversation text.
+  // ------------------------------------------------------------------
+
+  private opensPath(): string {
+    return join(this.metaDir(), 'opens.jsonl')
+  }
+
+  async appendOpenRecord(record: { slug: string; at: string; sessionId?: string }): Promise<void> {
+    await mkdir(this.metaDir(), { recursive: true })
+    await appendFile(this.opensPath(), `${JSON.stringify(record)}\n`, 'utf8')
+    await this.compactOpensIfNeeded()
+  }
+
+  private async compactOpensIfNeeded(): Promise<void> {
+    const file = this.opensPath()
+    let size = 0
+    try {
+      size = (await readFile(file, 'utf8')).length
+    } catch {
+      return
+    }
+    if (size <= 512 * 1024) return
+    const lines = (await readFile(file, 'utf8')).split('\n').filter((l) => l.trim() !== '')
+    await atomicWrite(file, lines.slice(-Math.max(1, Math.floor(lines.length / 4))).map((l) => `${l}\n`).join(''))
+  }
+
+  /** Opens in the recent window; tolerant of a torn tail like the other JSONLs. */
+  async readOpenRecords(limit = 2000): Promise<{ slug: string; at: string; sessionId?: string }[]> {
+    let raw: string
+    try {
+      raw = await readFile(this.opensPath(), 'utf8')
+    } catch {
+      return []
+    }
+    const out: { slug: string; at: string; sessionId?: string }[] = []
+    for (const line of raw.split('\n')) {
+      if (line.trim() === '') continue
+      try {
+        const parsed = JSON.parse(line) as { slug?: unknown; at?: unknown; sessionId?: unknown }
+        if (typeof parsed.slug === 'string' && typeof parsed.at === 'string') {
+          const rec: { slug: string; at: string; sessionId?: string } = { slug: parsed.slug, at: parsed.at }
+          if (typeof parsed.sessionId === 'string') rec.sessionId = parsed.sessionId
+          out.push(rec)
+        }
+      } catch {
+        // Torn tail line tolerated.
+      }
+    }
+    return out.slice(-limit)
+  }
+
+  // ------------------------------------------------------------------
   // Conflicted topics (ADR 0003) — retrieval demotes these
   // ------------------------------------------------------------------
 

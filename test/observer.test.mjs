@@ -188,3 +188,39 @@ test('observer: throwing service never propagates into the session loop', async 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------------------
+// v4 last-K ring buffer (design §4.2 B1) — the slow lane's only context source
+// ---------------------------------------------------------------------------
+
+test('observer: ring keeps the last 3 completed turns and copies out', async (t) => {
+  const { observer, cleanup } = make()
+  t.after(cleanup)
+  const userMsg = (text) => ({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
+  for (let i = 1; i <= 5; i += 1) {
+    observer.onSessionEvent('s1', 'user/message', userMsg(`u${i}`))
+    observer.onSessionEvent('s1', 'assistant/chunk', { chunk: { type: 'text-delta', text: `a${i}` } })
+    observer.onSessionEvent('s1', 'turn/end', {})
+  }
+  const ring = observer.recentTurns('s1')
+  assert.equal(ring.length, 3)
+  assert.deepEqual(ring.map((e) => e.user), ['u3', 'u4', 'u5'])
+  assert.deepEqual(ring.map((e) => e.assistant), ['a3', 'a4', 'a5'])
+  ring[0].user = 'mutated'
+  assert.equal(observer.recentTurns('s1')[0].user, 'u3', 'callers get a copy')
+  assert.equal(observer.turnCountOf('s1'), 5)
+  assert.equal(observer.recentTurns('unknown').length, 0)
+})
+
+test('observer: empty turns do not occupy ring slots; teardown drops the ring', async (t) => {
+  const { observer, cleanup } = make()
+  t.after(cleanup)
+  observer.onSessionEvent('s1', 'turn/end', {})
+  assert.equal(observer.recentTurns('s1').length, 0, 'a turn with no text leaves no ring entry')
+  observer.onSessionEvent('s1', 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'u1' }] })
+  observer.onSessionEvent('s1', 'assistant/chunk', { chunk: { type: 'text-delta', text: 'a1' } })
+  observer.onSessionEvent('s1', 'turn/end', {})
+  assert.equal(observer.recentTurns('s1').length, 1)
+  observer.onSessionEvent('s1', 'agent/disposed', undefined)
+  assert.equal(observer.recentTurns('s1').length, 0, 'session state (ring included) dropped at teardown')
+})

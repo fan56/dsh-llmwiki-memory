@@ -1,6 +1,6 @@
 # `include-subagents` 开关：子代理默认参与记忆，可整体关掉
 
-Status: accepted（supersedes ADR 0010 的「不做配置开关」条款）
+Status: accepted（supersedes ADR 0010 的「不做配置开关」条款；2026-09-03 默认值由 true 翻为 false——见 ADR 0014：一次性子会话的注入/观察消费率趋零，且慢道对子会话写死不跑）
 
 ## Context
 

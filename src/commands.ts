@@ -122,8 +122,9 @@ async function renderStatus(service: TopicsService): Promise<string> {
     `  冲突：${s.conflicts.length === 0 ? '无' : s.conflicts.join('、')}`,
     `  损坏文件：${s.broken.length === 0 ? '无' : s.broken.join('、')}`,
     `  git：${s.git ? `是（HEAD ${s.head?.slice(0, 10) ?? '??'}）` : '否'}`,
-    `  注入：${cfg.autoInject ? `开（topK ${cfg.topK}，预算 ${cfg.totalBudget} tok，阈值 ${cfg.matchThreshold}）` : '关'}`,
+    `  注入：${cfg.autoInject ? `${cfg.injectMode === 'digest' ? 'digest' : 'pointer'} 模式（topK ${cfg.topK}，预算 ${cfg.injectMode === 'digest' ? cfg.totalBudget : Math.min(cfg.totalBudget, 600)} tok，阈值 ${cfg.matchThreshold}）` : '关'}`,
     `  去重：${cfg.injectDedup ? '开（同会话已注入的 Topic 不重注）' : '关'}`,
+    `  慢道：${cfg.qualityLane === 'off' ? '关' : cfg.qualityLane === 'always' ? `每轮（${cfg.distillProvider}/${cfg.distillModel}）` : `采样 1/3（${cfg.distillProvider}/${cfg.distillModel}）`}`,
     `  蒸馏：${cfg.distillProvider !== '' && cfg.distillModel !== '' ? `${cfg.distillProvider}/${cfg.distillModel}，每 ${cfg.distillEveryTurns} 轮` : '未配置模型（/topics set distill-provider / distill-model）'}`,
   ]
   // Last lane outcome (distill-state summary) — what "checkable via
@@ -181,12 +182,35 @@ async function renderStats(service: TopicsService): Promise<string> {
     `  零命中轮：${stats.zeroHitRounds}；平均命中 ${stats.avgHitsPerRound} 条/轮`,
     `  平均预算占用：${stats.avgBudgetUtilization} tok`,
   ]
+  // v4 lane split — how much of the injection traffic each lane carries.
+  const slowRounds = records.filter((r) => r.lane === 'slow' || r.lane === 'mixed').length
+  if (slowRounds > 0) {
+    const consumed = records.filter((r) => r.consumedAt !== undefined && r.computedAt !== undefined)
+    let medianLag = ''
+    if (consumed.length > 0) {
+      const lags = consumed
+        .map((r) => Math.max(0, Date.parse(r.consumedAt as string) - Date.parse(r.computedAt as string)))
+        .sort((a, b) => a - b)
+      medianLag = `，赶上中位时延 ${(lags[Math.floor(lags.length / 2)] / 1000).toFixed(1)}s`
+    }
+    lines.push(`  慢道参与轮：${slowRounds}（快 ${(records.length - slowRounds)} / 慢或混合 ${slowRounds}${medianLag}）`)
+  }
+  // Pointer open rate (v4 §4.3): topic_open calls vs pointer entries injected.
+  const opens = await service.store.readOpenRecords()
+  if (opens.length > 0 || records.some((r) => r.lane !== undefined)) {
+    const entries = records.reduce(
+      (acc, r) => acc + r.hits.filter((h) => !(r.deduped ?? []).includes(h.slug)).length + (r.slow?.length ?? 0),
+      0,
+    )
+    const rate = entries === 0 ? 0 : Math.min(1, opens.length / entries)
+    lines.push(`  指针打开率：${(rate * 100).toFixed(1)}%（${opens.length} 次 topic_open / ${entries} 条注入指针）`)
+  }
   if (stats.topTopics.length > 0) {
     lines.push('  Top-N 被注入 Topic：')
     for (const t of stats.topTopics.slice(0, 5)) lines.push(`    ${t.slug} ×${t.count}`)
   }
   if (stats.nearMissHistogram.length > 0) {
-    lines.push('  Near-miss 分布（低于阈值被挡）：')
+    lines.push('  Near-miss 分布（低于阈值或被结构门挡下）：')
     for (const b of stats.nearMissHistogram) lines.push(`    ${b.bucket}: ${b.count}`)
     const hint = tuningHint(stats, service.cfg.matchThreshold)
     if (hint !== undefined) lines.push(`  💡 ${hint}`)

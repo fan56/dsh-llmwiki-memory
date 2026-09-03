@@ -45,7 +45,10 @@ test('scoreTopic: conflicted topics demoted but present', () => {
   const demoted = scoreTopic(new Set(tokenize('dsh cron 定时')), t, cfg)
   assert.ok(demoted.score < plain.score)
   assert.ok(demoted.reasons.includes('conflicted-demoted'))
-  assert.ok(Math.abs(demoted.score - plain.score * 0.3) < 0.01)
+  // v4: demotion multiplies the CONTENT score only; recency rides outside it
+  // as a pure ranking tiebreaker (never helps any gate).
+  assert.ok(Math.abs(demoted.gateScore - plain.gateScore * 0.3) < 0.01)
+  assert.ok(Math.abs(demoted.score - (plain.gateScore * 0.3 + 0.2)) < 0.01)
 })
 
 test('searchTopics: hit vs near-miss split and topK cap', () => {
@@ -96,4 +99,97 @@ test('searchTopics: empty query or roster yields zero rounds', () => {
 test('searchTopics: zero-injection discipline — unrelated query has no hits', () => {
   const out = searchTopics('量子计算纠错码', [topic()], { ...DEFAULT_RETRIEVAL, now: new Date() })
   assert.equal(out.hits.length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// v4 structural gate v0 (design §4.1)
+
+// A topic sharing NO vocabulary with the probe query except the named field.
+function disjoint(overrides = {}) {
+  return topic({
+    slug: 'cooking',
+    title: '烹饪手册',
+    description: '家常菜做法',
+    tags: [],
+    depends: [],
+    conclusion: '先洗菜再下锅。',
+    ...overrides,
+  })
+}
+
+test('gate v0: tags-only hit is blocked no matter the numeric score', () => {
+  // The v1 priming shape: tags are not a strong field, so even a fat
+  // tags-containment score cannot buy a pointer — it surfaces as a
+  // gate-blocked near-miss instead.
+  const t = disjoint({ tags: ['定时'], description: '', conclusion: '先洗菜再下锅。' })
+  const cfg = { ...DEFAULT_RETRIEVAL, now: new Date(), recencyWindowDays: 0 }
+  const s = scoreTopic(new Set(tokenize('定时')), t, cfg)
+  assert.ok(!s.strong, 'tags alone are not strong')
+  assert.equal(s.bodyHits, 0)
+  assert.ok(s.gateScore >= 0.3, `score is high but structurally empty: ${s.gateScore}`)
+  const out = searchTopics('定时', [t], cfg)
+  assert.equal(out.hits.length, 0, 'no pointer without structural evidence')
+  assert.ok(out.nearMisses.some((h) => h.slug === 'cooking'), 'blocked candidate stays visible as a near-miss')
+  assert.ok(out.nearMisses.find((h) => h.slug === 'cooking').reasons.includes('gate-blocked'))
+})
+
+test('gate v0: title / slug hits pass, single body term does not', () => {
+  const t = topic({ triggers: undefined, depends: [] })
+  const cfg = { ...DEFAULT_RETRIEVAL, now: new Date(), recencyWindowDays: 0 }
+  const byTitle = searchTopics('dsh-cron 定时插件', [t], cfg)
+  assert.ok(byTitle.hits.some((h) => h.slug === 'dsh-cron' && !h.viaGraph), 'title is a strong field')
+  const bySlug = searchTopics('dsh-cron', [t], cfg)
+  assert.ok(bySlug.hits.some((h) => h.slug === 'dsh-cron'), 'slug is a strong field')
+  // Exactly one body term — the gate demands a second one.
+  const thin = disjoint({ description: '定时任务调度策略概论', conclusion: '' })
+  const thinOut = searchTopics('定时', [thin], cfg)
+  assert.ok(!thinOut.hits.some((h) => h.slug === 'thin') && !thinOut.hits.some((h) => h.slug === 'cooking'), 'single body term blocked')
+  const rich = disjoint({ description: '定时任务', conclusion: '定时调度' })
+  const richOut = searchTopics('定时 调度', [rich], cfg)
+  assert.ok(richOut.hits.some((h) => h.slug === 'cooking'), 'two body terms pass')
+})
+
+test('gate v0: triggers are the heaviest strong field', () => {
+  const t = disjoint({ triggers: ['发版', 'release'] })
+  const cfg = { ...DEFAULT_RETRIEVAL, now: new Date(), recencyWindowDays: 0 }
+  const s = scoreTopic(new Set(tokenize('release')), t, cfg)
+  assert.ok(s.strong, 'trigger hit is strong')
+  assert.ok(s.reasons.some((r) => r.startsWith('triggers:')), s.reasons.join(','))
+  assert.ok(s.score >= 5 * 0.5, `trigger weight dominates: ${s.score}`)
+  const out = searchTopics('这次 release 怎么办', [t], cfg)
+  assert.ok(out.hits.some((h) => h.slug === 'cooking'))
+})
+
+test('gate v0: recency never carries a candidate across the threshold', () => {
+  // One weak lexical signal (1/15 query terms) sits below the threshold;
+  // recency +0.2 pushes the RANKING score over, but the gate sees the
+  // recency-free score and keeps the pointer out.
+  const t = disjoint({ tags: ['cron'], description: '', conclusion: '' })
+  const cfg = { ...DEFAULT_RETRIEVAL, now: new Date(), recencyWindowDays: 7, tagBoost: 0 }
+  const query = 'cron weekly report setup guide standup notes retro demo review plan'
+  const s = scoreTopic(new Set(tokenize(query)), t, cfg)
+  assert.ok(s.reasons.includes('recency'), 'recency still rides the ranking score')
+  assert.ok(s.score >= 0.3, `with recency the ranking score crosses: ${s.score}`)
+  assert.ok(s.gateScore < 0.3, `gate score excludes recency: ${s.gateScore}`)
+  const out = searchTopics(query, [t], cfg)
+  assert.equal(out.hits.length, 0, 'recency alone cannot inject')
+})
+
+test('gate v0: structuralGate=false keeps the explicit tool path ungated', () => {
+  // The same weak evidence the gate would block becomes an ordinary hit when
+  // the model explicitly asked (topic_search recall semantics).
+  const t = disjoint({ tags: ['cron'], description: 'cron 相关笔记', conclusion: '' })
+  const cfg = { ...DEFAULT_RETRIEVAL, now: new Date(), recencyWindowDays: 0 }
+  const query = 'cron weekly report setup guide standup notes retro demo review plan'
+  assert.equal(searchTopics(query, [t], { ...cfg }).hits.length, 0, 'gated: blocked')
+  const ungated = searchTopics(query, [t], { ...cfg, structuralGate: false })
+  assert.equal(ungated.hits.length, 1, 'ungated: topic_search keeps recall semantics')
+})
+
+test('gate v0: graph expansion stays exempt from the structural gate', () => {
+  const seed = topic({ slug: 'seed', title: '图种子', tags: ['graph'], depends: ['topics/neighbor.md'], conclusion: '图种子结论。' })
+  const neighbor = topic({ slug: 'neighbor', title: '邻居主题', tags: [], depends: [], conclusion: '邻居结论。' })
+  const cfg = { ...DEFAULT_RETRIEVAL, now: new Date(), recencyWindowDays: 0, threshold: 0.9, topK: 4 }
+  const out = searchTopics('图种子', [seed, neighbor], cfg)
+  assert.ok(out.hits.some((h) => h.slug === 'neighbor' && h.viaGraph), 'graph neighbor still injects')
 })

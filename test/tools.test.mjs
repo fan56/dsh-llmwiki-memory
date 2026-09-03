@@ -24,7 +24,32 @@ test('tools: registered set and names', async (t) => {
   const { service, cleanup } = tmpService()
   t.after(cleanup)
   const tools = buildTopicTools(service)
-  assert.deepEqual(tools.map((tool) => tool.name), ['topic_save', 'topic_search', 'topic_observe', 'topic_history'])
+  assert.deepEqual(tools.map((tool) => tool.name), ['topic_save', 'topic_open', 'topic_search', 'topic_observe', 'topic_history'])
+})
+
+test('tool topic_open: full conclusion + staleness notice, logged for open rate', async (t) => {
+  const { service, cleanup } = tmpService()
+  t.after(cleanup)
+  await service.store.ensure()
+  const [save, open] = buildTopicTools(service)
+  await save.execute({
+    title: 'dsh-cron 定时插件',
+    conclusion: '定时靠 headless + OS cron。',
+    description: '定时任务方案',
+    open_questions: ['错过窗口补跑吗'],
+    recommendations: '发布前先提版本',
+  })
+  const out = await open.execute({ slug: 'dsh-cron-定时插件' })
+  assert.equal(out.found, true)
+  assert.equal(out.conclusion, '定时靠 headless + OS cron。')
+  assert.deepEqual(out.openQuestions, ['错过窗口补跑吗'])
+  assert.equal(out.recommendations, '发布前先提版本')
+  assert.ok(typeof out.updatedAt === 'string' && out.updatedAt !== '', 'staleness timestamp present')
+  const opens = await service.store.readOpenRecords()
+  assert.equal(opens.length, 1)
+  assert.equal(opens[0].slug, 'dsh-cron-定时插件')
+  const miss = await open.execute({ slug: 'no-such-topic' })
+  assert.equal(miss.found, false)
 })
 
 test('tool topic_save: create then update, output shape', async (t) => {
@@ -65,7 +90,7 @@ test('tool topic_search: finds seeded topic', async (t) => {
   const { service, cleanup } = tmpService()
   t.after(cleanup)
   await service.store.ensure()
-  const [, search] = buildTopicTools(service)
+  const [, , search] = buildTopicTools(service)
   await service.saveTopic({ title: 'podman e2e 套件', conclusion: '改 src 要重建镜像，容器内 ~/.dsh 隔离。', tags: ['podman'] })
   const out = await search.execute({ query: 'podman 镜像 重建' })
   assert.equal(out.results.length, 1)
@@ -79,7 +104,7 @@ test('tool topic_observe: records atomic observations', async (t) => {
   const { service, cleanup } = tmpService()
   t.after(cleanup)
   await service.store.ensure()
-  const [, , observe] = buildTopicTools(service)
+  const [, , , observe] = buildTopicTools(service)
   const r = await observe.execute({ kind: 'decision', text: '采用方案 C 双轨' })
   assert.match(r.id, /^obs-/)
   const pending = await service.store.undistilledObservations()
@@ -91,7 +116,7 @@ test('tool topic_history: traces conclusion changes via git', async (t) => {
   const { service, cleanup } = tmpService()
   t.after(cleanup)
   await service.store.ensure()
-  const [save, , , history] = buildTopicTools(service)
+  const [save, , , , history] = buildTopicTools(service)
   const created = await save.execute({ title: 'evolving', conclusion: '第一版结论' })
   await save.execute({ title: 'evolving', conclusion: '第二版结论', slug: created.slug })
   await save.execute({ title: 'evolving', conclusion: '第三版结论', slug: created.slug })

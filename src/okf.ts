@@ -36,6 +36,13 @@ export interface TopicFrontmatter {
   title: string
   description?: string
   tags: string[]
+  /**
+   * Self-declared recall triggers (v4 dual-channel design §4.1): short
+   * phrases that should recall this topic when they appear in a query.
+   * Optional; bundles written before the field simply have no trigger
+   * matching (degraded, never an error). Highest-weight strong field.
+   */
+  triggers?: string[]
   /** Bundle-relative paths: `topics/<slug>.md`. */
   depends: string[]
   open_questions: string[]
@@ -123,6 +130,14 @@ export function parseTopicDoc(raw: string): TopicDoc {
     generated,
   }
   if (typeof fmRaw.description === 'string' && fmRaw.description !== '') fm.description = fmRaw.description
+  // Triggers are producer-optional and must never invalidate an otherwise
+  // sound doc: non-string entries are filtered, not thrown (degrade, per the
+  // v4 design's "旧 bundle 无此字段降级不命中").
+  if (fmRaw.triggers !== undefined && fmRaw.triggers !== null) {
+    const raw = Array.isArray(fmRaw.triggers) ? fmRaw.triggers : [fmRaw.triggers]
+    const triggers = raw.filter((t): t is string => typeof t === 'string' && t.trim() !== '').map((t) => t.trim())
+    if (triggers.length > 0) fm.triggers = triggers
+  }
   if ('verified' in fmRaw && fmRaw.verified !== null && fmRaw.verified !== undefined) fm.verified = asTrust(fmRaw.verified, 'verified')
   if (typeof fmRaw.stale_after === 'string' && fmRaw.stale_after !== '') fm.stale_after = fmRaw.stale_after
   if (Array.isArray(fmRaw.sources)) {
@@ -134,7 +149,7 @@ export function parseTopicDoc(raw: string): TopicDoc {
     })
   }
   // Preserve unknown producer-defined keys verbatim (OKF §4.1 extensions).
-  const known = new Set(['type', 'title', 'description', 'tags', 'depends', 'open_questions', 'impact', 'status', 'generated', 'verified', 'stale_after', 'sources'])
+  const known = new Set(['type', 'title', 'description', 'tags', 'triggers', 'depends', 'open_questions', 'impact', 'status', 'generated', 'verified', 'stale_after', 'sources'])
   for (const [k, v] of Object.entries(fmRaw)) {
     if (!known.has(k)) fm[k] = v
   }
@@ -150,6 +165,7 @@ export function serializeTopicDoc(doc: TopicDoc): string {
   }
   if (fm.description !== undefined) out.description = fm.description
   out.tags = fm.tags
+  if (fm.triggers !== undefined && fm.triggers.length > 0) out.triggers = fm.triggers
   out.depends = fm.depends
   out.open_questions = fm.open_questions
   out.impact = fm.impact

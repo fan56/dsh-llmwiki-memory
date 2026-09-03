@@ -24,7 +24,24 @@ interface SessionState {
   userText: string
   assistantText: string
   capturing: boolean
+  /** Last-K completed turns (v4 slow-lane data source, K≈3). */
+  ring: RingEntry[]
 }
+
+/** One completed turn in the ring buffer — the slow lane's only context source. */
+export interface RingEntry {
+  user: string
+  assistant: string
+  at: string
+}
+
+/**
+ * Ring capacity (v4 §4.2 B1): the slow lane sees at most the last 3 completed
+ * turns. Deliberately small — query building wants the current intent, not a
+ * transcript; larger windows re-introduce the verbatim-priming surface the
+ * lane exists to remove.
+ */
+export const RING_CAPACITY = 3
 
 export interface UserMessageLike {
   source?: { kind?: string }
@@ -58,10 +75,20 @@ export class Observer {
   private stateFor(sessionId: string): SessionState {
     let s = this.sessions.get(sessionId)
     if (s === undefined) {
-      s = { turnCount: 0, userText: '', assistantText: '', capturing: false }
+      s = { turnCount: 0, userText: '', assistantText: '', capturing: false, ring: [] }
       this.sessions.set(sessionId, s)
     }
     return s
+  }
+
+  /** Completed-turn snapshot for the slow lane (deep copy — callers may hold it). */
+  recentTurns(sessionId: string): RingEntry[] {
+    return (this.sessions.get(sessionId)?.ring ?? []).map((e) => ({ ...e }))
+  }
+
+  /** Current turn count for the session (0 before the first turn ends). */
+  turnCountOf(sessionId: string): number {
+    return this.sessions.get(sessionId)?.turnCount ?? 0
   }
 
   /** Entry point wired to ctx.on('session/event', …). */
@@ -93,6 +120,10 @@ export class Observer {
         state.turnCount += 1
         const user = state.userText.trim()
         const assistant = state.assistantText.trim()
+        if (user !== '' || assistant !== '') {
+          state.ring.push({ user, assistant, at: new Date().toISOString() })
+          if (state.ring.length > RING_CAPACITY) state.ring.splice(0, state.ring.length - RING_CAPACITY)
+        }
         if (cfg.autoObserve && user !== '' && assistant !== '') {
           await this.service.store.appendObservation({
             kind: 'turn',

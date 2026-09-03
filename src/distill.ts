@@ -30,6 +30,7 @@ export interface DistillOp {
   title?: string
   description?: string
   tags?: string[]
+  triggers?: string[]
   depends?: string[]
   open_questions?: string[]
   impact?: string[]
@@ -54,12 +55,13 @@ export const SYSTEM_PROMPT = [
   '你是 topic 记忆库的蒸馏引擎。输入是若干条未蒸馏的会话观察（JSON）和现有 topic 索引。',
   '任务：把观察沉淀成 Topic 操作。只输出一个 JSON 对象，不要任何其他文字、Markdown 代码块或解释。',
   '输出格式：{"ops": [...]}，每个元素：',
-  '  {"op":"create","title":"主题名","description":"一句话","tags":["小写标签"],"depends":["前置topic的slug"],',
+  '  {"op":"create","title":"主题名","description":"一句话","tags":["小写标签"],"triggers":["应想起本条的触发词"],"depends":["前置topic的slug"],',
   '   "open_questions":["未决问题"],"impact":["影响面"],"conclusion":"当前结论(自含散文)","recommendations":"可执行建议","status":"draft",',
   '   "observed_ids":["obs-..."]}',
   '  {"op":"update","slug":"已有slug","conclusion":"修订后的完整结论","open_questions":[...],"observed_ids":["obs-..."]}',
   '规则：',
   '- 硬性要求：每个 op 必须带 observed_ids 字段，值只能从本次输入「未蒸馏观察」里列出的 id 中逐字复制（形如 "obs-..."）；create 填它所综合依据的观察 id，update 填促使本次修订的观察 id。含列表之外 id 的条目会被过滤；observed_ids 缺失、为空或过滤后不剩任何有效 id 的 op 会被整体丢弃。',
+  '- create 建议带 triggers：3-8 个「什么输入出现时应该想起这条记忆」的短语，写具体名词/术语，禁止 dsh、配置、错误 之类的泛词。',
   '- conclusion 必须自含（不依赖观察原文也能读懂），写「目前有效的结论」，不是流水账。',
   '- 同一主题只允许一个 create；已有相近 topic 时用 update 修订它的 conclusion。',
   '- 观察里有价值就沉淀，没价值就跳过该观察（被跳过观察的 id 不要出现在任何 op 里）；没有可沉淀内容时输出 {"ops":[]}。',
@@ -616,6 +618,7 @@ export class Distiller {
             conclusion: op.conclusion,
             description: op.description,
             tags: op.tags,
+            triggers: Array.isArray(op.triggers) ? op.triggers.filter((t): t is string => typeof t === 'string') : undefined,
             depends: op.depends,
             openQuestions: op.open_questions,
             impact: op.impact,

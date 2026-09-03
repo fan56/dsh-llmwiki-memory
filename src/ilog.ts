@@ -6,6 +6,27 @@
  * @module ilog
  */
 
+/** Shadow re-gate verdict for one slow-lane pick (log-only, never blocks — v4 B3). */
+export interface ShadowVerdict {
+  slug: string
+  pass: boolean
+  why: string
+}
+
+/** Slow-lane query-build shape audit (v4 §4.3): priming evidence, no content. */
+export interface QueryBuildShape {
+  rawChars: number
+  keptChars: number
+  /** Content categories the query build dropped (e.g. pasted dumps). */
+  stripped: string[]
+}
+
+/** One slow-lane pointer that entered (or was budgeted out of) the context. */
+export interface SlowItem {
+  slug: string
+  why: string
+}
+
 export interface InjectionRecord {
   at: string
   sessionId?: string
@@ -13,7 +34,7 @@ export interface InjectionRecord {
   queryTokenCount: number
   querySample?: string
   rosterSize: number
-  hits: { slug: string; score: number; reasons: string[]; viaGraph: boolean }[]
+  hits: { slug: string; score: number; reasons: string[]; viaGraph: boolean; strong?: boolean; bodyHits?: number }[]
   nearMisses: { slug: string; score: number }[]
   injected: boolean
   why?: string
@@ -21,6 +42,20 @@ export interface InjectionRecord {
   /** Slugs blocked this round by session-level injection dedup (never assembled). */
   deduped?: string[]
   usedTokens?: number
+  // ---- v4 lane field family (§4.3) — absent on pure fast-lane rounds ----
+  /** fast = lexical pointers only; slow = async picks only; mixed = both. */
+  lane?: 'fast' | 'slow' | 'mixed'
+  /** Slow lane: when the pending was computed (turn/end) and consumed (spliced). */
+  computedAt?: string
+  consumedAt?: string
+  /** Log-only lexical re-gate verdicts taken at consumption time. */
+  shadowVerdict?: ShadowVerdict[]
+  queryBuild?: QueryBuildShape
+  /** Slow-lane model route (`provider/model`) and pipeline wall time in ms. */
+  slowModel?: string
+  slowMs?: number
+  /** Slow-lane pointers this round, in delivery order. */
+  slow?: SlowItem[]
 }
 
 export interface AggregateStats {
