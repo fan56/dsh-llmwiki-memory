@@ -136,7 +136,12 @@ const scriptMain = process.argv[1] !== undefined && process.argv[1].endsWith('re
 if (scriptMain) {
   const args = process.argv.slice(2)
   const thresholdArg = args.indexOf('--threshold')
-  const threshold = thresholdArg >= 0 ? Number(args[thresholdArg + 1]) : 0.3
+  const thresholdRaw = thresholdArg >= 0 ? Number(args[thresholdArg + 1]) : 0.3
+  if (!Number.isFinite(thresholdRaw) || thresholdRaw <= 0 || thresholdRaw >= 1) {
+    console.error('--threshold 需要一个 0..1 之间的小数（如 --threshold 0.30）')
+    process.exit(1)
+  }
+  const threshold = thresholdRaw
   const path = args.find((a) => !a.startsWith('--')) ?? defaultPath()
   const records = await loadRecords(path)
   const rows = replayRecords(records, threshold)

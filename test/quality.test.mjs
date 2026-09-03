@@ -8,6 +8,20 @@ import { BundleStore } from '../lib/store.js'
 import { TopicsService } from '../lib/service.js'
 import { SlowLane, parseJsonObject, PENDING_TTL_MS, TURN_LAG_LIMIT } from '../lib/quality.js'
 
+/** rm that tolerates an in-flight fire-and-forget write racing the cleanup. */
+async function rmRetry(path, attempts = 6) {
+  for (let i = 0; ; i += 1) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+      return
+    } catch (e) {
+      if (i >= attempts - 1 || (e.code !== 'ENOTEMPTY' && e.code !== 'ENOENT')) throw e
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+}
+
+
 const CFG = {
   repo: '', autoInject: true, injectDedup: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
   matchThreshold: 0.3, tagBoost: 0.15, graphDepth: 2, recencyWindowDays: 7,
@@ -19,7 +33,7 @@ function tmpService(overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'topics-quality-'))
   const store = new BundleStore(root)
   const service = new TopicsService(store, () => ({ ...CFG, ...overrides }))
-  return { root, store, service, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  return { root, store, service, cleanup: () => rmRetry(root) }
 }
 
 const ringEntry = (user, assistant) => ({ user, assistant, at: new Date().toISOString() })
@@ -286,12 +300,13 @@ test('retrieveSync: lane is mixed when both lanes deliver; expired pending is vi
   let recs = []
   for (let i = 0; i < 100; i += 1) {
     recs = await service.store.readInjectionRecords()
-    if (recs.some((x) => x.why === 'slow-expired-ttl')) break
+    if (recs.some((x) => x.slowExpired === 'ttl')) break
     await waitMs(20)
   }
-  const expired = recs.filter((x) => x.why === 'slow-expired-ttl')
+  const expired = recs.filter((x) => x.slowExpired === 'ttl')
   assert.equal(expired.length, 1)
   assert.equal(expired[0].lane, 'slow')
+  assert.equal(expired[0].why, 'slow-expired-ttl')
 })
 
 // ---------------------------------------------------------------------------
@@ -377,6 +392,65 @@ test('wiring: turn/end produces a pending, the next spliced consumes it', async 
   } finally {
     if (prevHome === undefined) delete process.env.DSH_TOPICS_HOME
     else process.env.DSH_TOPICS_HOME = prevHome
-    rmSync(root, { recursive: true, force: true })
+    await rmRetry(root)
+  }
+})
+
+test('retrieveSync: gate-blocked evidence lands in the persisted record', async (t) => {
+  const { service, cleanup } = tmpService()
+  t.after(cleanup)
+  await service.store.ensure()
+  // A tag-only topic the structural gate must block (v4: tags are not strong).
+  await service.saveTopic({ title: '烹饪手册', tags: ['定时'], description: '家常菜做法', conclusion: '先洗菜再下锅。' })
+  service.retrieveSync('定时', 's1')
+  let recs = []
+  for (let i = 0; i < 100; i += 1) {
+    recs = await service.store.readInjectionRecords()
+    if (recs.length > 0) break
+    await waitMs(20)
+  }
+  assert.equal(recs[0].hits.length, 0)
+  const nm = recs[0].nearMisses.find((x) => x.slug === '烹饪手册')
+  assert.notEqual(nm, undefined, 'blocked candidate is a near-miss')
+  assert.ok(nm.reasons.includes('gate-blocked'), `reasons persisted: ${JSON.stringify(nm)}`)
+})
+
+test('wiring: autoInject off → the slow lane never produces (no unconsumable spend)', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'topics-quality-off-'))
+  const prevHome = process.env.DSH_TOPICS_HOME
+  process.env.DSH_TOPICS_HOME = root
+  const handlers = []
+  const contexts = []
+  const agentsMap = new Map()
+  const store = new BundleStore(root)
+  await store.ensure()
+  const cfg = { ...CFG, qualityLane: 'always', autoObserve: false, autoInject: false }
+  const ctx = {
+    settings: { register: () => ({ get: () => cfg }) },
+    systemPrompt: { section: () => undefined, context: (input) => contexts.push(input) },
+    tools: { register: () => undefined },
+    agents: { get: (id) => agentsMap.get(String(id)) },
+    on: (type, handler) => {
+      if (type === 'session/event') handlers.push(handler)
+    },
+    inject: (_deps, cb) => cb({ effect: () => () => {} }),
+    effect: () => () => {},
+  }
+  apply(ctx)
+  const onEvent = handlers[0]
+  const dispatch = (sessionId, type, data) => onEvent.call(undefined, { id: sessionId }, { type, data })
+  const userMsg = (text) => ({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
+  try {
+    const llm = roleLlm()
+    agentsMap.set('s1', { id: 's1', inbox: { nextTurn: [], nextStep: [] }, ctx: { llm } })
+    dispatch('s1', 'user/message', userMsg('echo marker qx7qz 还没处理完吗'))
+    dispatch('s1', 'assistant/chunk', { chunk: { type: 'text-delta', text: '在看。' } })
+    dispatch('s1', 'turn/end', {})
+    await waitMs(300)
+    assert.equal(llm.laneCalls, 0, 'no aux LLM spend when injection is off')
+  } finally {
+    if (prevHome === undefined) delete process.env.DSH_TOPICS_HOME
+    else process.env.DSH_TOPICS_HOME = prevHome
+    await rmRetry(root)
   }
 })

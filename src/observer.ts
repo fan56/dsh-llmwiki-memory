@@ -118,6 +118,16 @@ export class Observer {
       }
       case 'turn/end': {
         state.turnCount += 1
+        // Cadence trigger FIRST and synchronously: index.ts dispatches the
+        // slow quality lane the moment onSessionEvent returns — which happens
+        // at the first await below (the observation write). The lane's
+        // distill-yield guard reads distiller.hasPending, so the every-N slot
+        // must be claimed before that first await or the %15 collision would
+        // never yield. The trigger's run fetches observations lazily; this
+        // turn's capture below still lands in the pool for a later run.
+        if (cfg.distillEveryTurns > 0 && state.turnCount % cfg.distillEveryTurns === 0) {
+          this.onRequestDistill(sessionId, 'every-n')
+        }
         const user = state.userText.trim()
         const assistant = state.assistantText.trim()
         if (user !== '' || assistant !== '') {
@@ -137,9 +147,6 @@ export class Observer {
         }
         state.userText = ''
         state.assistantText = ''
-        if (cfg.distillEveryTurns > 0 && state.turnCount % cfg.distillEveryTurns === 0) {
-          this.onRequestDistill(sessionId, 'every-n')
-        }
         return
       }
       // Real session teardown: both cordis events fire at teardown (agent

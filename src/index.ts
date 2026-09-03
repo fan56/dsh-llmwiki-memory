@@ -283,6 +283,10 @@ export function apply(ctx: Context): void {
    */
   function dispatchSlowLane(sessionId: string): void {
     try {
+      // Injection is off → the lane would burn aux LLM calls on pendings no
+      // spliced will ever consume (the spliced branch early-returns on
+      // autoInject before reaching the consume point).
+      if (!cfgNow().autoInject) return
       if (isDelegated(agents()?.get(sessionId))) return
       if (distiller.hasPending(sessionId)) return
       // Same trigger-time capture the distill trigger uses: the agent's
@@ -346,9 +350,22 @@ export function apply(ctx: Context): void {
     },
   )
   const distiller = new Distiller(service, caller)
+  /**
+   * The ONE sessionLlm release decision, shared by every settle path (distill
+   * run settle, slow-lane pipeline settle, teardown, manual-distill decline):
+   * drop the captured entry only when no future read can need it. Keeping
+   * this in one place is what stopped the slow lane from re-opening the
+   * concern-1 leak (a disposal landing mid-pipeline must be closed out by
+   * the pipeline's own settle, not only by the one-shot disposal event).
+   */
+  const releaseSessionLlm = (sessionId: string): void => {
+    if (!distiller.hasPending(sessionId) && !slowLane.hasInFlight(sessionId)) sessionLlm.delete(sessionId)
+  }
   // Slow quality lane (v4 §4.2): shares the distill caller/route; owns its
   // own pending lifecycle (produce at turn/end, consume at the next splice).
-  const slowLane = new SlowLane(service, caller)
+  // The settle hook re-runs the release check because a disposal that landed
+  // mid-pipeline deferred to THIS pipeline and never fires again.
+  const slowLane = new SlowLane(service, caller, releaseSessionLlm)
 
   // ---- Observer (M2) ----
   // The process-exit disposer awaits this run (bounded): the callback below
@@ -371,11 +388,7 @@ export function apply(ctx: Context): void {
     const run = distiller.request(sessionId, reason)
     if (run !== undefined) {
       if (sessionId === 'dispose') exitDistill = run
-      void run
-        .finally(() => {
-          if (!distiller.hasPending(sessionId) && !slowLane.hasInFlight(sessionId)) sessionLlm.delete(sessionId)
-        })
-        .catch(() => undefined)
+      void run.finally(() => releaseSessionLlm(sessionId)).catch(() => undefined)
     }
   })
 
@@ -489,9 +502,9 @@ export function apply(ctx: Context): void {
       slowLane.clear(sessionId)
       // A teardown-triggered run (session-end distill) reads the payload
       // capture lazily: drop the entry here only when no run can still read
-      // it. The slow lane's in-flight pipeline reads it too (shared caller),
-      // so it holds the entry open the same way (v4 §4.2 守卫).
-      if (!distiller.hasPending(sessionId) && !slowLane.hasInFlight(sessionId)) sessionLlm.delete(sessionId)
+      // it. The slow lane's in-flight pipeline reads it too (shared caller);
+      // its settle hook re-runs this check when the pipeline finishes.
+      releaseSessionLlm(sessionId)
     }) as never)
   }
 
@@ -591,14 +604,12 @@ export function apply(ctx: Context): void {
         // capture above may have (re)armed the session's llm entry; with no
         // run pending to consume-and-release it, drop it here — a declined
         // request leaves no settle hook behind.
-        if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
+        releaseSessionLlm(sessionId)
         return distiller.configured
           ? { ok: false, reason: 'in-flight', created: [], updated: [], marked: 0 }
           : { ok: false, reason: 'no-model', created: [], updated: [], marked: 0 }
       }
-      return run.finally(() => {
-        if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
-      })
+      return run.finally(() => releaseSessionLlm(sessionId))
     }
     cmdCtx.effect(() => commands.register(buildTopicsCommand(service, mutate as never, resolveAsk, resolveLlm, manualDistill)), 'topics: /topics')
   })

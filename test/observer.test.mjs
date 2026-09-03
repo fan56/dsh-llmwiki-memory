@@ -7,6 +7,20 @@ import { BundleStore } from '../lib/store.js'
 import { TopicsService } from '../lib/service.js'
 import { Observer } from '../lib/observer.js'
 
+/** rm that tolerates an in-flight fire-and-forget write racing the cleanup. */
+async function rmRetry(path, attempts = 6) {
+  for (let i = 0; ; i += 1) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+      return
+    } catch (e) {
+      if (i >= attempts - 1 || (e.code !== 'ENOTEMPTY' && e.code !== 'ENOENT')) throw e
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+}
+
+
 function make() {
   const root = mkdtempSync(join(tmpdir(), 'topics-obs-'))
   const store = new BundleStore(root)
@@ -19,7 +33,7 @@ function make() {
   const service = new TopicsService(store, () => cfg)
   const requests = []
   const observer = new Observer(service, (sessionId, reason) => requests.push({ sessionId, reason }))
-  const cleanup = () => rmSync(root, { recursive: true, force: true })
+  const cleanup = () => rmRetry(root)
   return { store, service, observer, requests, setCfg: (p) => { cfg = { ...cfg, ...p } }, cleanup }
 }
 
@@ -194,8 +208,10 @@ test('observer: throwing service never propagates into the session loop', async 
 // ---------------------------------------------------------------------------
 
 test('observer: ring keeps the last 3 completed turns and copies out', async (t) => {
-  const { observer, cleanup } = make()
-  t.after(cleanup)
+  const h = make()
+  h.setCfg({ autoObserve: false })
+  t.after(h.cleanup)
+  const { observer } = h
   const userMsg = (text) => ({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
   for (let i = 1; i <= 5; i += 1) {
     observer.onSessionEvent('s1', 'user/message', userMsg(`u${i}`))
@@ -213,8 +229,10 @@ test('observer: ring keeps the last 3 completed turns and copies out', async (t)
 })
 
 test('observer: empty turns do not occupy ring slots; teardown drops the ring', async (t) => {
-  const { observer, cleanup } = make()
-  t.after(cleanup)
+  const h = make()
+  h.setCfg({ autoObserve: false })
+  t.after(h.cleanup)
+  const { observer } = h
   observer.onSessionEvent('s1', 'turn/end', {})
   assert.equal(observer.recentTurns('s1').length, 0, 'a turn with no text leaves no ring entry')
   observer.onSessionEvent('s1', 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'u1' }] })

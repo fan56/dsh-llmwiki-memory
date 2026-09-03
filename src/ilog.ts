@@ -35,7 +35,7 @@ export interface InjectionRecord {
   querySample?: string
   rosterSize: number
   hits: { slug: string; score: number; reasons: string[]; viaGraph: boolean; strong?: boolean; bodyHits?: number }[]
-  nearMisses: { slug: string; score: number }[]
+  nearMisses: { slug: string; score: number; reasons?: string[] }[]
   injected: boolean
   why?: string
   dropped?: { slug: string; reason: string }[]
@@ -45,6 +45,8 @@ export interface InjectionRecord {
   // ---- v4 lane field family (§4.3) — absent on pure fast-lane rounds ----
   /** fast = lexical pointers only; slow = async picks only; mixed = both. */
   lane?: 'fast' | 'slow' | 'mixed'
+  /** Slow lane: the consumed pending died at its hard bounds (TTL / turn-lag). */
+  slowExpired?: 'ttl' | 'turn-lag'
   /** Slow lane: when the pending was computed (turn/end) and consumed (spliced). */
   computedAt?: string
   consumedAt?: string

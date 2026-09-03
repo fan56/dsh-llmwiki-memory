@@ -6,6 +6,20 @@ import { join } from 'node:path'
 import { apply, settleBounded, EXIT_DISTILL_TIMEOUT_MS } from '../lib/index.js'
 import { BundleStore } from '../lib/store.js'
 
+/** rm that tolerates an in-flight fire-and-forget write racing the cleanup. */
+async function rmRetry(path, attempts = 6) {
+  for (let i = 0; ; i += 1) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+      return
+    } catch (e) {
+      if (i >= attempts - 1 || (e.code !== 'ENOTEMPTY' && e.code !== 'ENOENT')) throw e
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+}
+
+
 const CFG = {
   repo: '', autoInject: false, injectDedup: true, topK: 4, perTopicBudget: 300,
   totalBudget: 1500, matchThreshold: 0.3, tagBoost: 0.15, graphDepth: 2,
@@ -75,10 +89,10 @@ function bootPlugin(overrides = {}) {
     if (type === 'agent/disposed') handler({ agent: agentsMap.get(String(sessionId)) ?? { id: sessionId } })
     else handler({ id: sessionId })
   }
-  const cleanup = () => {
+  const cleanup = async () => {
     if (prevHome === undefined) delete process.env.DSH_TOPICS_HOME
     else process.env.DSH_TOPICS_HOME = prevHome
-    rmSync(root, { recursive: true, force: true })
+    await rmRetry(root)
   }
   return { root, agentsMap, dispatch, dispose, effects, cleanup }
 }

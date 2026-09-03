@@ -62,6 +62,8 @@ export interface SearchHit {
   /** Structural gate v0 evidence (absent on graph-expanded entries). */
   strong?: boolean
   bodyHits?: number
+  /** Recency-free score; graph decay starts from it (settle ties with the gate). */
+  gateScore?: number
 }
 
 export interface SearchOutcome {
@@ -266,7 +268,9 @@ export function searchTopics(query: string, roster: readonly RetrievableTopic[],
       }
     }
     const seen = new Set(hits.map((h) => h.slug))
-    let frontier = hits.map((h) => ({ slug: h.slug, score: h.score }))
+    // Decay starts from the gateScore: recency must not re-enter through the
+    // graph channel after being banned from the direct gate.
+    let frontier = hits.map((h) => ({ slug: h.slug, score: h.gateScore ?? h.score }))
     for (let depth = 1; depth <= c.graphDepth && frontier.length > 0; depth += 1) {
       const next: { slug: string; score: number }[] = []
       for (const node of frontier) {

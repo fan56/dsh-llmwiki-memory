@@ -7,6 +7,20 @@ import { BundleStore } from '../lib/store.js'
 import { TopicsService } from '../lib/service.js'
 import { buildTopicTools } from '../lib/tools.js'
 
+/** rm that tolerates an in-flight fire-and-forget write racing the cleanup. */
+async function rmRetry(path, attempts = 6) {
+  for (let i = 0; ; i += 1) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+      return
+    } catch (e) {
+      if (i >= attempts - 1 || (e.code !== 'ENOTEMPTY' && e.code !== 'ENOENT')) throw e
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+}
+
+
 function tmpService() {
   const root = mkdtempSync(join(tmpdir(), 'topics-tools-'))
   const store = new BundleStore(root)
@@ -17,7 +31,7 @@ function tmpService() {
     distillOnSessionEnd: true, distillProvider: '', distillModel: '', pushDebounceSeconds: 45,
   }
   const service = new TopicsService(store, () => cfg)
-  return { root, store, service, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  return { root, store, service, cleanup: () => rmRetry(root) }
 }
 
 test('tools: registered set and names', async (t) => {

@@ -133,10 +133,19 @@ export class SlowLane {
   private inFlight = new Map<string, Promise<void>>()
   private readonly service: TopicsService
   private readonly caller: ModelCaller | undefined
+  /**
+   * Settle hook: fires when a session's pipeline leaves the in-flight map.
+   * The host uses it to re-check the sessionLlm release guards — a disposal
+   * that landed mid-pipeline held the entry open for THIS pipeline, and this
+   * callback is the only chance to release it afterwards (the distill lane
+   * has the same shape via its run.finally).
+   */
+  private readonly onSettle: (sessionId: string) => void
 
-  constructor(service: TopicsService, caller: ModelCaller | undefined) {
+  constructor(service: TopicsService, caller: ModelCaller | undefined, onSettle: (sessionId: string) => void = () => undefined) {
     this.service = service
     this.caller = caller
+    this.onSettle = onSettle
   }
 
   /** True while the session has a pending slot awaiting the next spliced. */
@@ -147,10 +156,6 @@ export class SlowLane {
   /** True while the session's produce pipeline is still running (llm-capture guard). */
   hasInFlight(sessionId: string): boolean {
     return this.inFlight.has(sessionId)
-  }
-
-  hasAnyPending(): boolean {
-    return this.pending.size > 0
   }
 
   /** Drop the pending slot (session teardown, restore boundary). */
@@ -171,7 +176,10 @@ export class SlowLane {
       if (cfg.qualityLane === 'sampled' && input.turnId % SAMPLED_EVERY !== 0) return
       if (this.caller === undefined || this.inFlight.has(sessionId)) return
       if (input.ring.length === 0) return
-      const run = this.produce(sessionId, input).finally(() => this.inFlight.delete(sessionId))
+      const run = this.produce(sessionId, input).finally(() => {
+        this.inFlight.delete(sessionId)
+        this.onSettle(sessionId)
+      })
       this.inFlight.set(sessionId, run)
       void run.catch(() => undefined)
     } catch {

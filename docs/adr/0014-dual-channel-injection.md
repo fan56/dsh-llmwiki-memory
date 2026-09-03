@@ -14,7 +14,7 @@ Amends: 0004（注入热路径免 LLM 约束）、0006（注入默认值）、00
 - **I1 组装确定性**：spliced→prompt 同步、无 LLM；异步产物只经 pending 缓冲进入下一轮。
 - **I2 时效分级**：当轮背景=快道；跨轮回指=慢道（允许延迟到下一个 steer message）。
 - **I3 可丢弃性**：任何异步产物可超时/可缺失/可过期，永不阻塞、永不报错进会话循环。
-- **I4 预算上界**：快道 600 tok（pointer 每条 ≤80，`total-budget` 可下调不可上调此界）；慢道与快道共享同一预算。
+- **I4 预算上界**：快道 600 tok（pointer 每条 ≤80，`total-budget` 可下调不可上调此界）；慢道与快道共享同一预算（digest 回退模式下慢道指针随 `total-budget`，共享语义不变、上界随模式）。
 - **I5 注入物形态**：指针为默认形态（`inject-mode: pointer`），正文仅经 `topic_open` 按需拉取（带 staleness 提示）。
 
 ### 快道（同步，保底）
@@ -39,15 +39,17 @@ Amends: 0004（注入热路径免 LLM 约束）、0006（注入默认值）、00
 | 事件 | pending 状态 |
 |---|---|
 | `turn/end`（非 delegated、非 distill 撞车、采样命中、ring 非空、管线空闲） | 产（覆盖写同 session 槽位前必先判 in-flight，无并发覆盖窗口） |
-| 下一个 `agent/inbox/spliced`（steer message） | 消——无论注入与否槽位即清（消费即清）；过期/消费都写 ilog（`lane` 字段族 + `why: slow-expired-*`） |
+| 下一个 `agent/inbox/spliced`（steer message，claimedText 非空） | 消——无论注入与否槽位即清（消费即清）；消费/过期都写 ilog（`lane` 字段族；过期另记 `slowExpired: ttl\|turn-lag`，零注入轮再带 `why: slow-expired-*`）。不满足消费前提的 spliced（canceled、无 user 文本、autoInject off）不消费、pending 顺延，由 TTL/turn-lag 兜底 |
 | `session/end-seed`（resume 边界） | 清 |
 | `agent/disposed` / `session/disposed`（双事件任一） | 清 |
 | `turn/start` | **不动**——turns map 的 delete 不得合并/吃掉 pending，两者并存禁合并 |
-| TTL 10min 或 turn-lag >2 在消费点判定 | 清 + 记 `slow-expired-ttl` / `slow-expired-turn-lag` |
+| TTL 10min 或 turn-lag >2 在消费点判定 | 清 + 记 `slowExpired`（零注入轮带 `why: slow-expired-*`；快道恰有注入时不抢 `why` 语义） |
+| autoInject=off | 不产——慢道不再烧无消费者的 aux 调用（快道关即全关） |
+| distill 节拍（每 N 轮）撞车 | 让位——节拍槽位在 observer turn/end 的首个 await 之前同步占位（`distiller.hasPending` 在慢道派发前必为真） |
 
 ### 观测（B4）
 
-InjectionRecord 扩 lane 字段族：`lane: fast|slow|mixed`、`computedAt/consumedAt`（赶上率）、`shadowVerdict[]`、`queryBuild{rawChars,keptChars,stripped[]}`、`slowModel/slowMs`、`slow[]`。新增 `meta/opens.jsonl`（topic_open 调用流水）；`/topics stats` 增「指针打开率」（topic_open 次数 / 注入条目）与慢道参与轮、赶上中位时延。
+InjectionRecord 扩 lane 字段族：`lane: fast|slow|mixed`（凡消费过 pending 或过期的轮必落值，不出现「有字段族无 lane」）、`computedAt/consumedAt`（赶上率）、`shadowVerdict[]`、`queryBuild{rawChars,keptChars,stripped[]}`、`slowModel/slowMs`、`slow[]`、`slowExpired`；near-misses 持久化 `reasons`（`gate-blocked` 回放证据）。快道关（autoInject off）= 慢道全关。新增 `meta/opens.jsonl`（topic_open 调用流水）；`/topics stats` 增「指针打开率」（topic_open 次数 / 注入条目）与慢道参与轮、赶上中位时延。
 
 ### 结构门阈值标定
 

@@ -198,6 +198,32 @@ export class TopicsService {
     const roster = this.rosterSync()
     const empty: SearchOutcome = { hits: [], nearMisses: [], rosterSize: roster.length }
     if (!cfg.autoInject || query.trim() === '' || roster.length === 0) {
+      // A consumed/expired pending must always leave an ilog trace (ADR 0014:
+      // 过期/消费都写 ilog) — even when the fast path early-returns here
+      // because the roster vanished between production and consumption.
+      if (cfg.autoInject && query.trim() !== '' && (slow !== undefined || slowExpired !== undefined)) {
+        const trace: InjectionRecord = {
+          at: new Date().toISOString(),
+          queryTokenCount: tokenize(query).length,
+          querySample: querySample(query),
+          rosterSize: roster.length,
+          hits: [],
+          nearMisses: [],
+          injected: false,
+          why: slowExpired !== undefined ? `slow-expired-${slowExpired}` : 'slow-no-roster',
+          lane: 'slow',
+        }
+        if (sessionId !== undefined) trace.sessionId = sessionId
+        if (slowExpired !== undefined) trace.slowExpired = slowExpired
+        if (slow !== undefined) {
+          trace.computedAt = slow.computedAt
+          trace.queryBuild = slow.queryBuild
+          trace.slowModel = slow.model
+          trace.slowMs = slow.ms
+          trace.slow = []
+        }
+        void this.store.appendInjectionRecord(trace).catch(() => undefined)
+      }
       return { text: '', outcome: empty, deduped: [], included: [], slowIncluded: [] }
     }
     const conflicts = this.store.getConflictsSync()
@@ -279,7 +305,9 @@ export class TopicsService {
       querySample: querySample(query),
       rosterSize: outcome.rosterSize,
       hits: outcome.hits.map((h) => ({ slug: h.slug, score: h.score, reasons: h.reasons, viaGraph: h.viaGraph, strong: h.strong, bodyHits: h.bodyHits })),
-      nearMisses: outcome.nearMisses.map((h) => ({ slug: h.slug, score: h.score })),
+      // Reasons ride along: the gate-blocked marker is the replay evidence
+      // the P3 threshold decision needs (ADR 0014).
+      nearMisses: outcome.nearMisses.map((h) => ({ slug: h.slug, score: h.score, reasons: h.reasons })),
       injected: injection.text !== '',
       usedTokens: injection.usedTokens,
     }
@@ -289,23 +317,24 @@ export class TopicsService {
       record.dropped = [...(record.dropped ?? []), ...unreadable.map((slug) => ({ slug, reason: 'doc-unreadable' }))]
     }
     if (slow !== undefined) {
-      // The lane family records whenever a consumed pending produced picks to
-      // judge (delivered or budget-dropped) — shadow verdicts are evidence
-      // for the P3 「shadow 转正」 decision and must survive a budget squeeze.
-      if (slowDelivered.length > 0 || shadow.length > 0) {
-        record.computedAt = slow.computedAt
-        record.consumedAt = consumedAt
-        record.shadowVerdict = shadow
-        record.queryBuild = slow.queryBuild
-        record.slowModel = slow.model
-        record.slowMs = slow.ms
-        record.slow = slowDelivered
-      }
-      if (slowDelivered.length > 0) {
-        record.lane = injection.included.length > 0 ? 'mixed' : 'slow'
-      } else if (injection.included.length > 0) {
-        record.lane = 'fast'
-      }
+      // Any round whose pending was consumed is a slow-participating round —
+      // lane never stays undefined when the lane family is present (a
+      // delivered pick with fast pointers is 'mixed'; a consumed-but-empty
+      // round beside fast pointers stays 'fast'; everything else 'slow').
+      record.lane = slowDelivered.length > 0 ? (injection.included.length > 0 ? 'mixed' : 'slow') : injection.included.length > 0 ? 'fast' : 'slow'
+      record.computedAt = slow.computedAt
+      record.consumedAt = consumedAt
+      if (shadow.length > 0) record.shadowVerdict = shadow
+      record.queryBuild = slow.queryBuild
+      record.slowModel = slow.model
+      record.slowMs = slow.ms
+      record.slow = slowDelivered
+    }
+    if (slowExpired !== undefined) {
+      // Expiry is recorded INDEPENDENT of whether the fast lane injected —
+      // the 赶上率 denominator must not lose rounds to a coincidental hit.
+      record.slowExpired = slowExpired
+      if (record.lane === undefined) record.lane = injection.text !== '' ? 'fast' : 'slow'
     }
     if (injection.text === '' && (outcome.hits.length > 0 || slowPointers.length > 0)) {
       // All hits deduped is a different story than a budget squeeze — say so.

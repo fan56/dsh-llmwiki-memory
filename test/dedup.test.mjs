@@ -7,6 +7,20 @@ import { apply } from '../lib/index.js'
 import { BundleStore } from '../lib/store.js'
 import { TopicsService } from '../lib/service.js'
 
+/** rm that tolerates an in-flight fire-and-forget write racing the cleanup. */
+async function rmRetry(path, attempts = 6) {
+  for (let i = 0; ; i += 1) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+      return
+    } catch (e) {
+      if (i >= attempts - 1 || (e.code !== 'ENOTEMPTY' && e.code !== 'ENOENT')) throw e
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+}
+
+
 const DEFAULT_CFG = {
   repo: '', autoInject: true, injectDedup: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
   matchThreshold: 0.3, tagBoost: 0.15, graphDepth: 2, recencyWindowDays: 7,
@@ -79,10 +93,10 @@ function bootPlugin(overrides = {}) {
     dispatch(sessionId, 'agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1 })
   }
   const injectedText = (sessionId) => contexts[0].text({ agent: { id: sessionId } })
-  const cleanup = () => {
+  const cleanup = async () => {
     if (prevHome === undefined) delete process.env.DSH_TOPICS_HOME
     else process.env.DSH_TOPICS_HOME = prevHome
-    rmSync(root, { recursive: true, force: true })
+    await rmRetry(root)
   }
   return { root, dispatch, dispose, claim, injectedText, cleanup }
 }
@@ -109,7 +123,7 @@ async function readRecords(store, expected) {
 
 test('retrieveSync: exclude filters hits before assembly and reports deduped', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'topics-dedup-svc-'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
+  t.after(() => rmRetry(root))
   const store = new BundleStore(root)
   await store.ensure()
   const service = new TopicsService(store, () => ({ ...DEFAULT_CFG }))

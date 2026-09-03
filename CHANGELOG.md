@@ -15,7 +15,8 @@
 - **默认值变更**：`includeSubagents` 默认 true → false（ADR 0011 修订；显式配置不受影响）；新增 `inject-mode`（默认 pointer）与 `quality-lane`（默认 sampled）配置键。
 - **结构门回放标定**：`scripts/replay-structural-gate.mjs`（只读）遍历存量 injections.jsonl，从 reasons 重构门判定，输出逐条对照与 0.20–0.45 阈值扫描；存量 `tags:` 理由混合 slug+tags 不可拆，按弱字段保守处理。
 - ADR 0014 新增（五不变式 + pending 生命周期表 + 结构门/慢道/观测决定）；ADR 0004/0006/0011 标注修订。
-- 测试 207 → 238：结构门（强/弱字段、recency 界、图扩展豁免、工具路径）、pointer 渲染与预算 clamp、triggers round-trip 与容错、ring buffer K=3、慢道单元（守卫/消费即清/过期/去重/校验/错误遏制）、service 级合并（lane 字段族/shadow/dedup/混合轮）、index 级 wiring（turn/end 产 → 下一 spliced 消）。
+- 第四轮 review 修复（APPROVE-WITH-NITS 的七项 P1 全数落地）：`autoInject: off` 时慢道不再产出（否则每个采样轮白烧 2 次 aux 调用、pending 永无人消费）；distill 每轮节拍触发移到 observer turn/end 首个 await 之前（否则 `%15` 撞车场景的慢道让位确定性失效）；慢道管线结算钩子接入 sessionLlm 释放（否则销毁事件落在管线窗口内时捕获条目永久滞留）；消费/过期的 pending 在快道早退路径（roster 清空等）也落 ilog 痕迹（`slow-no-roster`）；过期标记改 `slowExpired` 独立字段——不再被快道恰好注入抢掉可见性，消费过 pending 的轮 `lane` 必落值；`gate-blocked` 的 reasons 随 near-misses 持久化（P3 门槛回放证据）；图扩展衰减改从 gateScore 起算（recency 不得借图通道回流门槛）；manualDistill 的释放守卫统一走共享 helper；测试清理钩子改为容忍在途写盘的重试删除（消灭 `rmSync` ENOTEMPTY 偶发红）。
+- 测试 207 → 240：结构门（强/弱字段、recency 界、图扩展豁免、工具路径）、pointer 渲染与预算 clamp、triggers round-trip 与容错、ring buffer K=3、慢道单元（守卫/消费即清/过期/去重/校验/错误遏制）、service 级合并（lane 字段族/shadow/dedup/混合轮/gate-blocked 入账）、index 级 wiring（turn/end 产 → 下一 spliced 消、autoInject off 全关）。
 
 ## 0.6.0
 
