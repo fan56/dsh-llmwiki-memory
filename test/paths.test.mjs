@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { resolveBundleRoot, resolveDshHome } from '../lib/paths.js'
+import { resolveBundleRoot, resolveDshHome, migrateLegacyBundleRoot } from '../lib/paths.js'
 
 /**
  * One-time data-dir migration (~/.dsh/llmwiki → ~/.dsh/topics, ADR 0013):
@@ -89,6 +89,27 @@ test('paths: fail-open — an unmovable legacy dir keeps the plugin on the old p
     } finally {
       chmodSync(home, 0o755)
     }
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('paths: concurrent boot won the rename — next exists, legacy gone → must return next, never the dead legacy path', () => {
+  const home = mkdtempSync(join(tmpdir(), 'topics-home-'))
+  try {
+    const next = join(home, 'topics')
+    const legacy = join(home, 'llmwiki')
+    // Post-race state: a concurrent boot already renamed legacy -> next, so
+    // only the new dir is left. A losing process must converge on `next` on
+    // its next observation — resolving to the now-gone `legacy` would strand
+    // the session on an empty bundle writing into an orphan directory.
+    mkdirSync(join(next, 'meta'), { recursive: true })
+    writeFileSync(join(next, 'index.md'), '# migrated\n')
+    withEnv(home, () => {
+      assert.equal(resolveBundleRoot(), next)
+    })
+    assert.equal(migrateLegacyBundleRoot(next, legacy), next, 'direct seam: same contract')
+    assert.equal(existsSync(legacy), false, 'legacy stays gone — no resurrection, no fallback to it')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

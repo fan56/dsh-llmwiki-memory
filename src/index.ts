@@ -74,7 +74,9 @@ export const inject = ['systemPrompt', 'tools', 'settings', 'agents', 'llm']
 // supported spelling (same adaptation as dsh-cron / dsh-model-sync).
 const OWN_NS = 'topics'
 
-/** Pre-rename settings namespace (dsh-llmwiki-memory ≤ 0.5.x) — read-only legacy source. */
+/** Pre-rename settings namespace (dsh-llmwiki-memory ≤ 0.5.x). The plugin
+ *  itself never writes to it, but while the migration window is open the
+ *  registration shows up in config UIs like any other namespace (ADR 0013). */
 const LEGACY_NS = 'llmwiki'
 
 interface AgentMapLike {
@@ -118,7 +120,7 @@ interface SettingsNsLike {
  * user-tuned to preserve). Returns the in-flight write for tests; apply()
  * fire-and-forgets it.
  */
-export function migrateLegacySettings(settings: SettingsNsLike): Promise<void> | undefined {
+export function migrateLegacySettings(settings: SettingsNsLike, warn?: (message: string) => void): Promise<void> | undefined {
   try {
     const describe = settings.describe?.bind(settings)
     if (describe === undefined) return undefined
@@ -128,6 +130,19 @@ export function migrateLegacySettings(settings: SettingsNsLike): Promise<void> |
     }
     // Already migrated / user-configured on the new name — never touch it.
     if (findUser(OWN_NS) !== undefined) return undefined
+    // Old-plugin coexistence (ADR 0013): `llmwiki` already registered means
+    // the pre-rename dsh-llmwiki-memory 0.5.x is still loaded in this host.
+    // Our register below would hit the duplicate guard, migration would
+    // silently skip, and both plugins would drift onto separate bundles
+    // (split brain). Warn loudly instead of registering blind.
+    if (describe().some((entry) => entry.ns === LEGACY_NS)) {
+      warn?.(
+        'dsh-topics-memory: the legacy dsh-llmwiki-memory (0.5.x) is still running in this host — ' +
+          'settings migration was skipped because the "llmwiki" namespace is already registered. ' +
+          'Remove @aiwayds/dsh-llmwiki-memory from this profile so only dsh-topics-memory loads.',
+      )
+      return undefined
+    }
     // Registering the legacy namespace is the only API that surfaces its
     // stored section; a duplicate or schema-invalid section throws — contained.
     settings.register(LEGACY_NS, TopicsConfig)
@@ -149,10 +164,21 @@ export function apply(ctx: Context): void {
   const settingsNs = (ctx as unknown as { settings?: { register(n: unknown, s: unknown): { get(): unknown } } }).settings
   if (settingsNs === undefined) return
   const scope = settingsNs.register(OWN_NS, TopicsConfig)
+  // Host logger access is best-effort: cordis always provides one, but bare
+  // test harnesses may not — the migration stays silent rather than throwing.
+  const warn = (message: string): void => {
+    try {
+      const logger = (ctx as unknown as { logger?: { warn?: (m: string) => void; error?: (m: string) => void; info?: (m: string) => void } }).logger
+      const sink = logger?.warn ?? logger?.error ?? logger?.info
+      sink?.call(logger, message)
+    } catch {
+      // contained — a missing/broken logger must not break startup
+    }
+  }
   // Carry user-tuned values over from the pre-rename namespace (one-time,
   // fail-open, idempotent — see migrateLegacySettings). Fire-and-forget: the
   // write settles on its own; a rejection only skips the migration.
-  void migrateLegacySettings(settingsNs as unknown as SettingsNsLike)
+  void migrateLegacySettings(settingsNs as unknown as SettingsNsLike, warn)
   const cfgNow = (): TopicsConfigValue => {
     const v = scope.get() as Partial<TopicsConfigValue> | undefined
     // Schema defaults may not be applied by bare test harnesses; fill them in.

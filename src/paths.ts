@@ -46,7 +46,11 @@ export function migrateLegacyBundleRoot(next: string, legacy: string): string {
     renameSync(legacy, next)
     return next
   } catch {
-    return legacy
+    // A concurrent boot may have won the rename: re-check the live filesystem
+    // instead of trusting the stale pre-rename view — falling back to `legacy`
+    // after it was moved away would strand this session on a dead path (empty
+    // bundle, writes into an orphan directory nothing will ever read).
+    return existsSync(next) ? next : legacy
   }
 }
 

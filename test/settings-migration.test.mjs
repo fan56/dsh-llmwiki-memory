@@ -14,8 +14,10 @@ import { apply, migrateLegacySettings, name as pluginName } from '../lib/index.j
  */
 function fakeSettings(doc, opts = {}) {
   const registrations = new Map()
-  return {
+  const warns = []
+  const settings = {
     registered: registrations,
+    warns,
     register(ns) {
       if (registrations.has(ns)) throw new Error(`settings namespace "${ns}" is already registered`)
       if (ns === 'llmwiki' && opts.legacyInvalid) throw new TypeError('invalid stored section')
@@ -36,10 +38,30 @@ function fakeSettings(doc, opts = {}) {
       doc[ns] = r.user
     },
   }
+  if (opts.preRegistered?.length) {
+    for (const ns of opts.preRegistered) settings.register(ns)
+  }
+  return settings
 }
 
 test('settings-migration: plugin identity carries the new name', () => {
   assert.equal(pluginName, 'dsh-topics-memory')
+})
+
+test('settings-migration: old-plugin coexistence → loud warn, migration skipped, no duplicate register', () => {
+  // Simulates the 0.5.x dsh-llmwiki-memory still loaded: IT registered the
+  // legacy `llmwiki` namespace before us. Registering blind would throw a
+  // contained duplicate error and the migration would skip SILENTLY while
+  // both plugins drift onto separate bundles.
+  const doc = { llmwiki: { topK: 6, distillProvider: 'p', distillModel: 'm' } }
+  const settings = fakeSettings(doc, { preRegistered: ['topics', 'llmwiki'] })
+  const warns = []
+  assert.equal(migrateLegacySettings(settings, (m) => warns.push(m)), undefined, 'no write scheduled')
+  assert.equal(warns.length, 1, 'exactly one loud warning')
+  assert.match(warns[0], /dsh-llmwiki-memory \(0\.5\.x\) is still running/)
+  assert.match(warns[0], /Remove @aiwayds\/dsh-llmwiki-memory/)
+  assert.deepEqual(doc.topics, undefined, 'no values copied behind a double load')
+  assert.deepEqual(doc.llmwiki, { topK: 6, distillProvider: 'p', distillModel: 'm' }, 'legacy section untouched')
 })
 
 test('settings-migration: tuned legacy keys are copied into topics once', async () => {

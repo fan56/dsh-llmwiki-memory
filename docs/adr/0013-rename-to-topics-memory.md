@@ -30,8 +30,10 @@ slash 命令族（`/wiki` → `/topics`）、settings namespace（`llmwiki` → 
 - **两条迁移路径，一条约束集（one-time / idempotent / fail-open）**：
   - 数据目录（paths.ts `resolveBundleRoot`）：仅当未设 `$DSH_TOPICS_HOME` 时，
     若新目录 `<dshHome>/topics` 不存在且旧目录 `<dshHome>/llmwiki` 存在，
-    `renameSync` 旧 → 新；失败（跨设备、权限等）回落旧路径继续服务——
-    旧 bundle 可用永远优于空新 bundle。显式 `$DSH_TOPICS_HOME` 完全绕过
+    `renameSync` 旧 → 新；失败（权限类，如父目录只读）回落旧路径继续服务——
+    旧 bundle 可用永远优于空新 bundle；catch 内复查新目录是否已存在（并发
+    boot 场景另一进程可能已把旧目录 rename 走，回落已被移走的旧路径会把本
+    会话钉死在孤儿目录上）。显式 `$DSH_TOPICS_HOME` 完全绕过
     （测试/CI 隔离不受影响）。git 仓随目录 rename 整体迁移，remote 不动。
   - settings namespace（index.ts `migrateLegacySettings`）：注册新 namespace 后，
     以注册旧 namespace（`describe().user` 是唯一能看到用户原始键值的通道）
@@ -45,12 +47,27 @@ slash 命令族（`/wiki` → `/topics`）、settings namespace（`llmwiki` → 
 
 - **迁移是幂等的**：数据目录迁移在新目录存在后成为 no-op；settings 迁移在
   新 namespace 非默认后不再触发。两个迁移互相独立，任一失败不影响另一个。
+- **发布顺序依赖：GitHub 仓名先改，tag 后推**。release.yml 的 publish gate
+  是 `github.repository == 'fan56/dsh-topics-memory'`——GitHub 仓库实际改名
+  前推 v* tag，两个 job 会全部静默 skip，且事后改名不会重触发已消费的 tag
+  事件（唯一 remedy：删 tag 重推）。**发布顺序 = 先 `gh repo rename
+  dsh-topics-memory`，再推 v\* tag**。新包发布后对旧包执行
+  `npm deprecate @aiwayds/dsh-llmwiki-memory`（deprecate message 指向
+  `@aiwayds/dsh-topics-memory`），完成旧包收尾。
+- **与旧插件共存（双载场景）**：用户若没从 profile 移除 0.5.x，旧
+  dsh-llmwiki-memory 会先注册 `llmwiki`，新插件的 legacy 注册撞 duplicate
+  被吞 → settings 迁移静默跳过，且两边各抱一个 bundle（旧 `~/.dsh/llmwiki`
+  未迁移、新 `~/.dsh/topics` 空建）→ 记忆脑裂。防御：注册前先 `describe()`
+  探测 `llmwiki` 是否已被注册（= 旧插件在场），命中即用宿主 logger 打一条
+  醒目 warn（点名旧包在运行、迁移已跳过、须从 profile 移除旧包）并放弃
+  本次迁移——把静默失败变成可行动的显式提示。
 - **旧 namespace 暂时留在 settings.yaml 与 config UI 里**：迁移完成前的每次
-  启动都会为读取其 section 而注册旧 namespace（仅读取，不写入）；迁移完成
-  （新 namespace 非默认）后不再注册。存量 section 不被消费，手动删除无害；
-  不自动清理是因为删除用户文件内容超出了改名的必要范围。
+  启动都会为读取其 section 而注册旧 namespace——注册即是普通的（可编辑）
+  配置段，会在 config UI 里作为可调项出现；只是本插件自身从不写入它。迁移
+  完成（新 namespace 非默认）后不再注册。存量 section 不被消费，手动删除
+  无害；不自动清理是因为删除用户文件内容超出了改名的必要范围。
 - **`$DSH_TOPICS_HOME` 用户需自行搬目录**：显式覆盖路径的用户历来自己管理
   目录，迁移只服务默认布局。
-- **验证矩阵**：单测覆盖迁移的成功/跳过/fail-open 三态（test/paths.test.mjs、
-  test/settings-migration.test.mjs）；e2e 的 bundle 种植路径与 settings 顶层键
-  同步换新名（e2e/scenarios/30、40）。
+- **验证矩阵**：单测覆盖迁移的成功/跳过/fail-open/并发竞态四态
+  （test/paths.test.mjs、test/settings-migration.test.mjs）；e2e 的 bundle
+  种植路径与 settings 顶层键同步换新名（e2e/scenarios/30、40）。
