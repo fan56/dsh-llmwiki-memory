@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.0 (2026-09-03)
+
+- 依赖整体迁到 dsh rc/stable 线（0.1.2-rc.1 闭合，alpha 线退役）：peerDependencies 地板 `dsh-tools`/`dsh-llm`/`dsh-settings`/`dsh-commands`/`dsh-util-values` 由 `>=0.1.2-alpha.4` 提到 `>=0.1.2-rc.1`；devDependencies 15 个 `@deepseek-ai/dsh-*` 精确钉版 `0.1.2-alpha.4` → `0.1.2-rc.1`（cordis/schemastery 不动）。CI 与 release 的 dsh 闭包改为运行时解析 `latest`/`next` 中更新者、永不 `@alpha`（该迁移已在 0.7.0 前的 main 上先行落地，此处一并归档说明）。
+- README 支持声明改为 rc/stable-only：`Requires dsh >= 0.1.2-rc.1`，本插件只跟随 dsh RC/stable 线，不再支持 alpha 线（旧声明的「rc 线不再支持」方向相反，已纠正）。
+
 ## 0.7.0
 
 双通道注入改造（设计定稿 `docs/design/2026-09-03-dual-channel-injection-v4.md`，ADR 0014，amends 0004/0006/0011）：
