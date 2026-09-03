@@ -1,10 +1,10 @@
 # CI: build, typecheck, unit suite, and a real-host boot smoke on every push
 # to main and every pull request.
 #
-# The dsh CLI rides the registry's `alpha` dist-tag — resolved at runtime,
-# never hand-pinned (the rc.8 lesson: a hand-pinned rc went stale and rotted
-# the gate); the plugin targets >= 0.1.2-alpha.3, so `latest` (still rc.2)
-# would boot a host older than the peer floor. No daily schedule by design
+# The dsh CLI rides the rc/stable line — the newest of the `latest`
+# (stable) and `next` (rc) dist-tags, resolved at runtime, never
+# hand-pinned (the stale-pin lesson: a hand-pinned version rotted the
+# gate); the alpha line is retired for CI (2026-09-03). No daily schedule by design
 # (Q8): this repo has no runtime gate that needs upstream drift detection;
 # the boot smoke still runs the plugin under the real host on every change.
 name: CI
@@ -39,11 +39,20 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
-      - name: Install dsh CLI (rolling @alpha dist-tag, never hand-pinned)
+      - name: Install dsh CLI (rolling rc/stable line — newest of latest/next, never alpha)
         run: |
-          DSH_VERSION="$(npm view @deepseek-ai/dsh@alpha version)"
+          # Policy (2026-09-03): the alpha line is retired for CI. Resolve the
+          # newest of the `latest` (stable) and `next` (rc) dist-tags at
+          # runtime, never hand-pinned — when a stable 0.1.2+ lands on
+          # `latest` it wins over the rc by plain semver compare.
+          STABLE="$(npm view @deepseek-ai/dsh@latest version)"
+          RC="$(npm view @deepseek-ai/dsh@next version 2>/dev/null || true)"
+          DSH_VERSION="$STABLE"
+          if [ -n "$RC" ] && [ "$(printf '%s\n' "$STABLE" "$RC" | sort -V | tail -1)" = "$RC" ]; then
+            DSH_VERSION="$RC"
+          fi
           echo "dsh closure: ${DSH_VERSION}"
-          npm install -g "@deepseek-ai/dsh@alpha" --no-audit --no-fund
+          npm install -g "@deepseek-ai/dsh@${DSH_VERSION}" --no-audit --no-fund
 
       # The test files import lib/, so build explicitly before testing.
       - name: Build & Check (tsc)

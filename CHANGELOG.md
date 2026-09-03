@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 双通道注入改造（设计定稿 `docs/design/2026-09-03-dual-channel-injection-v4.md`，ADR 0014，amends 0004/0006/0011）：
 
