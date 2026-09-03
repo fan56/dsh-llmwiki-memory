@@ -94,15 +94,15 @@ test('paths: fail-open — an unmovable legacy dir keeps the plugin on the old p
   }
 })
 
-test('paths: concurrent boot won the rename — next exists, legacy gone → must return next, never the dead legacy path', () => {
+test('paths: concurrent boot won the rename — post-race end state converges on next via the public API', () => {
   const home = mkdtempSync(join(tmpdir(), 'topics-home-'))
   try {
     const next = join(home, 'topics')
     const legacy = join(home, 'llmwiki')
-    // Post-race state: a concurrent boot already renamed legacy -> next, so
-    // only the new dir is left. A losing process must converge on `next` on
-    // its next observation — resolving to the now-gone `legacy` would strand
-    // the session on an empty bundle writing into an orphan directory.
+    // Post-race END STATE at the public API: after a concurrent boot renamed
+    // legacy -> next, any subsequent resolution must land on next. (The
+    // catch-branch itself is locked deterministically by the stubbed-fs
+    // tests below — this one pins the observable convergence contract.)
     mkdirSync(join(next, 'meta'), { recursive: true })
     writeFileSync(join(next, 'index.md'), '# migrated\n')
     withEnv(home, () => {
@@ -113,6 +113,39 @@ test('paths: concurrent boot won the rename — next exists, legacy gone → mus
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+test('paths: rename race, catch re-check wins — stubbed fs flips next into place as our rename loses → returns next', () => {
+  // Deterministic TOCTOU the real-fs suite cannot produce: the stub lets the
+  // STALE guard checks pass (next absent, legacy present), then the rename
+  // throws at the exact moment the concurrent winner lands the directory.
+  // Regression-lock for the M1 fix: reverting the catch to a blind
+  // `return legacy` must fail this test.
+  const next = join('/dsh-home', 'topics')
+  const legacy = join('/dsh-home', 'llmwiki')
+  let nextExists = false
+  const stub = {
+    existsSync: (path) => (path === next ? nextExists : true),
+    renameSync: () => {
+      nextExists = true // the concurrent winner puts the directory in place
+      throw Object.assign(new Error('raced away'), { code: 'ENOTEMPTY' })
+    },
+  }
+  assert.equal(migrateLegacyBundleRoot(next, legacy, stub), next, 'the loser follows the winner, never the dead legacy path')
+})
+
+test('paths: rename fails with no concurrent winner → falls back to legacy (stubbed fs)', () => {
+  // The plain fail-open arm: the rename throws and next never appears, so
+  // the legacy path (still present) keeps serving this session.
+  const next = join('/dsh-home', 'topics')
+  const legacy = join('/dsh-home', 'llmwiki')
+  const stub = {
+    existsSync: (path) => path === legacy,
+    renameSync: () => {
+      throw Object.assign(new Error('read-only parent'), { code: 'EACCES' })
+    },
+  }
+  assert.equal(migrateLegacyBundleRoot(next, legacy, stub), legacy)
 })
 
 test('paths: explicit $DSH_TOPICS_HOME bypasses migration entirely', () => {

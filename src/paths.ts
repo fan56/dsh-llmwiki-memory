@@ -31,6 +31,17 @@ export function resolveBundleRoot(): string {
 }
 
 /**
+ * Minimal fs surface, injectable so tests can hit the rename-race catch
+ * deterministically (a real-fs test cannot mutate the world between the
+ * guard checks and the rename). Defaults to the real node:fs functions —
+ * production callers never pass it.
+ */
+interface FsLike {
+  existsSync(path: string): boolean
+  renameSync(from: string, to: string): void
+}
+
+/**
  * One-time migration from the pre-rename data location (`~/.dsh/llmwiki` to
  * `~/.dsh/topics`, ADR 0013). Constraints:
  * - one-time: fires only while the new directory is absent and the legacy one
@@ -40,17 +51,17 @@ export function resolveBundleRoot(): string {
  *   keeps serving the old bundle instead of booting an empty new one;
  * - bypassed entirely by an explicit $DSH_TOPICS_HOME (test/CI isolation).
  */
-export function migrateLegacyBundleRoot(next: string, legacy: string): string {
-  if (existsSync(next) || !existsSync(legacy)) return next
+export function migrateLegacyBundleRoot(next: string, legacy: string, fs: FsLike = { existsSync, renameSync }): string {
+  if (fs.existsSync(next) || !fs.existsSync(legacy)) return next
   try {
-    renameSync(legacy, next)
+    fs.renameSync(legacy, next)
     return next
   } catch {
     // A concurrent boot may have won the rename: re-check the live filesystem
     // instead of trusting the stale pre-rename view — falling back to `legacy`
     // after it was moved away would strand this session on a dead path (empty
     // bundle, writes into an orphan directory nothing will ever read).
-    return existsSync(next) ? next : legacy
+    return fs.existsSync(next) ? next : legacy
   }
 }
 

@@ -68,6 +68,8 @@ slash 命令族（`/wiki` → `/topics`）、settings namespace（`llmwiki` → 
   无害；不自动清理是因为删除用户文件内容超出了改名的必要范围。
 - **`$DSH_TOPICS_HOME` 用户需自行搬目录**：显式覆盖路径的用户历来自己管理
   目录，迁移只服务默认布局。
-- **验证矩阵**：单测覆盖迁移的成功/跳过/fail-open/并发竞态四态
+- **验证矩阵**：单测覆盖迁移的成功/跳过/fail-open，以及并发竞态的赛后
+  终态——竞态败者收敛到新目录、绝不回落已被移走的旧路径（真实 fs 用例锁
+  公开 API 收敛契约，fs seam stub 用例确定性命中 catch 复查分支）
   （test/paths.test.mjs、test/settings-migration.test.mjs）；e2e 的 bundle
   种植路径与 settings 顶层键同步换新名（e2e/scenarios/30、40）。
