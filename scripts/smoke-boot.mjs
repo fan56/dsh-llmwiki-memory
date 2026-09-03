@@ -24,9 +24,9 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'))
-const ownName = pkg.name // @aiwayds/dsh-llmwiki-memory
+const ownName = pkg.name // @aiwayds/dsh-topics-memory
 
-const work = mkdtempSync(path.join(tmpdir(), 'dsh-llmwiki-smoke-'))
+const work = mkdtempSync(path.join(tmpdir(), 'dsh-topics-smoke-'))
 const home = path.join(work, 'dsh-home')
 const profile = path.join(home, 'profiles', 'smoke')
 mkdirSync(profile, { recursive: true })

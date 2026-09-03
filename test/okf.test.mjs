@@ -28,7 +28,7 @@ depends:
 open_questions: []
 impact: [运维]
 status: stable
-generated: { by: agent:dsh-llmwiki-memory@Mac, at: 2026-08-31T00:00:00Z }
+generated: { by: agent:dsh-topics-memory@Mac, at: 2026-08-31T00:00:00Z }
 ---
 
 # Conclusion
@@ -49,7 +49,7 @@ test('parseTopicDoc: full profile round-trip', () => {
   assert.deepEqual(doc.fm.open_questions, [])
   assert.deepEqual(doc.fm.impact, ['运维'])
   assert.equal(doc.fm.status, 'stable')
-  assert.equal(doc.fm.generated.by, 'agent:dsh-llmwiki-memory@Mac')
+  assert.equal(doc.fm.generated.by, 'agent:dsh-topics-memory@Mac')
   assert.match(doc.body, /# Conclusion/)
   const again = parseTopicDoc(serializeTopicDoc(doc))
   assert.equal(again.fm.title, doc.fm.title)

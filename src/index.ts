@@ -1,17 +1,17 @@
 /**
- * dsh-llmwiki-memory — OKF topic memory for DeepSeek Harness.
+ * dsh-topics-memory — OKF topic memory for DeepSeek Harness.
  *
  * Wiring (per ADR 0001–0008):
- *  - `llmwiki` settings namespace (user-tunable via /wiki set)
+ *  - `topics` settings namespace (user-tunable via /topics set)
  *  - static systemPrompt section teaching the topic tools (never volatile
  *    content — the provider cache prefix stays byte-stable)
  *  - same-turn injection: retrieval runs synchronously at inbox-claim time
  *    (`agent/inbox/spliced` live event, which dispatches BEFORE prompt
- *    assembly — the only seam early enough, per dsh-llmwiki's validated
- *    recipe) and a systemPrompt.context() provider serves the assembled
+ *    assembly — the only seam early enough, per the dsh-llmwiki upstream's
+ *    validated recipe) and a systemPrompt.context() provider serves the assembled
  *    digest for this turn
  *  - model tools: topic_save / topic_search / topic_observe / topic_history
- *  - `/wiki` command via the shared dsh-commands registry (optional peer)
+ *  - `/topics` command via the shared dsh-commands registry (optional peer)
  *  - observer (M2): turn capture + distill triggers over session events
  *  - sync (ADR 0003): pull on session start, debounced write-through push
  */
@@ -24,17 +24,17 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import * as paths from './paths.ts'
 import { BundleStore } from './store.ts'
-import { WikiService } from './service.ts'
+import { TopicsService } from './service.ts'
 import { Sync } from './sync.ts'
 import { buildTopicTools } from './tools.ts'
-import { buildWikiCommand } from './commands.ts'
+import { buildTopicsCommand } from './commands.ts'
 import { Observer, textOf, type UserMessageLike } from './observer.ts'
 import { Distiller, defaultModelCaller, type DistillResult, type LlmCandidateShape } from './distill.ts'
-import { LlmwikiConfig, type LlmwikiConfigValue } from './config.ts'
+import { CONFIG_KEYS, TopicsConfig, type TopicsConfigValue } from './config.ts'
 import type { AskServiceResolver, AskServiceShape, LlmDirectoryResolver, LlmDirectoryShape } from './onboard.ts'
 import { isDelegated } from './delegation.ts'
 
-export const name = 'dsh-llmwiki-memory'
+export const name = 'dsh-topics-memory'
 
 /**
  * Bounded wait for the process-exit distill. Session teardown is the last
@@ -72,7 +72,10 @@ export const inject = ['systemPrompt', 'tools', 'settings', 'agents', 'llm']
 // (SettingsNamespaceInput) and validates the same lowercase-hyphenated
 // pattern at runtime via parseSettingsNamespace. A plain literal is the
 // supported spelling (same adaptation as dsh-cron / dsh-model-sync).
-const OWN_NS = 'llmwiki'
+const OWN_NS = 'topics'
+
+/** Pre-rename settings namespace (dsh-llmwiki-memory ≤ 0.5.x) — read-only legacy source. */
+const LEGACY_NS = 'llmwiki'
 
 interface AgentMapLike {
   get(id: unknown): { inbox: { nextTurn: readonly unknown[]; nextStep: readonly unknown[] } } | undefined
@@ -88,14 +91,70 @@ interface UserMessageData {
   content: readonly { type: string; text?: string }[]
 }
 
+/**
+ * Settings-provider surface the legacy-namespace migration needs. Structurally
+ * typed like every other host seam in this file, so bare test harnesses
+ * without dsh-settings still load the module: a host lacking `describe` or
+ * `mutate` simply skips the migration.
+ */
+interface SettingsNsLike {
+  register(n: unknown, s: unknown): { get(): unknown }
+  describe?(): { ns: unknown; user?: unknown }[]
+  mutate?(ns: unknown, ops: readonly { op: 'set'; path: string[]; value?: unknown }[]): Promise<void>
+}
+
+/**
+ * One-time carry-over of user-tuned values from the pre-rename `llmwiki`
+ * settings namespace into `topics` (ADR 0013). Constraints:
+ * - one-time: only fires while the new namespace holds NO raw user overrides —
+ *   describe().user is the only way to tell user keys from schema defaults,
+ *   because scope.get() folds the defaults in;
+ * - idempotent: after the copy (or any config written on the new name) the
+ *   override check short-circuits every later boot;
+ * - fail-open: registering the legacy namespace can throw (duplicate or
+ *   schema-invalid stored section) and the write can reject — both contained,
+ *   so plugin startup never depends on the migration.
+ * Keys whose stored value equals the schema default are not copied (nothing
+ * user-tuned to preserve). Returns the in-flight write for tests; apply()
+ * fire-and-forgets it.
+ */
+export function migrateLegacySettings(settings: SettingsNsLike): Promise<void> | undefined {
+  try {
+    const describe = settings.describe?.bind(settings)
+    if (describe === undefined) return undefined
+    const findUser = (ns: unknown): Record<string, unknown> | undefined => {
+      const user = describe().find((entry) => entry.ns === ns)?.user
+      return user !== undefined && user !== null && typeof user === 'object' ? (user as Record<string, unknown>) : undefined
+    }
+    // Already migrated / user-configured on the new name — never touch it.
+    if (findUser(OWN_NS) !== undefined) return undefined
+    // Registering the legacy namespace is the only API that surfaces its
+    // stored section; a duplicate or schema-invalid section throws — contained.
+    settings.register(LEGACY_NS, TopicsConfig)
+    const legacyUser = findUser(LEGACY_NS)
+    if (legacyUser === undefined) return undefined
+    const ops = CONFIG_KEYS.filter((k) => k in legacyUser && legacyUser[k] !== DEFAULTS[k]).map(
+      (k) => ({ op: 'set' as const, path: [k], value: legacyUser[k] }),
+    )
+    if (ops.length === 0) return undefined
+    return settings.mutate?.call(settings, OWN_NS, ops)?.catch(() => undefined)
+  } catch {
+    return undefined
+  }
+}
+
 export function apply(ctx: Context): void {
   // dsh-settings is part of every real host closure but is a runtime-optional
   // peer so bare test harnesses can still load this module.
   const settingsNs = (ctx as unknown as { settings?: { register(n: unknown, s: unknown): { get(): unknown } } }).settings
   if (settingsNs === undefined) return
-  const scope = settingsNs.register(OWN_NS, LlmwikiConfig)
-  const cfgNow = (): LlmwikiConfigValue => {
-    const v = scope.get() as Partial<LlmwikiConfigValue> | undefined
+  const scope = settingsNs.register(OWN_NS, TopicsConfig)
+  // Carry user-tuned values over from the pre-rename namespace (one-time,
+  // fail-open, idempotent — see migrateLegacySettings). Fire-and-forget: the
+  // write settles on its own; a rejection only skips the migration.
+  void migrateLegacySettings(settingsNs as unknown as SettingsNsLike)
+  const cfgNow = (): TopicsConfigValue => {
+    const v = scope.get() as Partial<TopicsConfigValue> | undefined
     // Schema defaults may not be applied by bare test harnesses; fill them in.
     return { ...DEFAULTS, ...v }
   }
@@ -103,7 +162,7 @@ export function apply(ctx: Context): void {
   const root = paths.resolveBundleRoot()
   const store = new BundleStore(root)
   const sync = new Sync(store, () => ({ repo: cfgNow().repo, pushDebounceSeconds: cfgNow().pushDebounceSeconds }))
-  const service = new WikiService(store, cfgNow, sync)
+  const service = new TopicsService(store, cfgNow, sync)
 
   // ---- Static teaching section (cache-safe: constant bytes every turn) ----
   ;(ctx as unknown as {
@@ -112,7 +171,7 @@ export function apply(ctx: Context): void {
       context(input: { name: string; order: number; text: (asm: unknown) => string }): void
     }
   }).systemPrompt.section({
-    name: 'llmwiki:guide',
+    name: 'topics:guide',
     order: 90,
     text: [
       '你有长期 topic 记忆（本地 OKF bundle，git 可追溯）。',
@@ -137,7 +196,7 @@ export function apply(ctx: Context): void {
   const injectedBySession = new Map<string, Set<string>>()
 
   ;(ctx as unknown as { systemPrompt: { context(input: { name: string; order: number; text: (asm: unknown) => string }): void } }).systemPrompt.context({
-    name: 'llmwiki:topic-memory',
+    name: 'topics:topic-memory',
     order: 95,
     text: (asm: unknown) => {
       const agent = (asm as { agent?: { id?: unknown } }).agent
@@ -386,10 +445,10 @@ export function apply(ctx: Context): void {
         return settleBounded(exitDistill, EXIT_DISTILL_TIMEOUT_MS)
       }
     },
-    'llmwiki: lifecycle',
+    'topics: lifecycle',
   )
 
-  // ---- /wiki command (optional peer) ----
+  // ---- /topics command (optional peer) ----
   ctx.inject(['commands'], (cmdCtx) => {
     const commands = (cmdCtx as unknown as { commands?: { register(definition: unknown): () => void } }).commands
     if (commands === undefined || commands.register === undefined) return
@@ -402,7 +461,7 @@ export function apply(ctx: Context): void {
     }
     // Resolved lazily at invocation time: whichever UI registered the ask-user
     // provider (TUI panel / web composer / feishu card, ask-router optional)
-    // renders /wiki onboard's panels; a host without one falls back to typed input.
+    // renders /topics onboard's panels; a host without one falls back to typed input.
     const resolveAsk: AskServiceResolver = () => {
       try {
         const value = typeof (ctx as { get?: (k: string) => unknown }).get === 'function'
@@ -435,7 +494,7 @@ export function apply(ctx: Context): void {
         root,
       ]
     }
-    // Manual /wiki distill trigger: same lane, same in-flight guard, same
+    // Manual /topics distill trigger: same lane, same in-flight guard, same
     // trigger-time llm capture — the command runs inside a live session, so
     // its agent's scoped instance is the freshest adapter holder.
     const manualDistill = async (invocation: unknown): Promise<DistillResult> => {
@@ -460,12 +519,12 @@ export function apply(ctx: Context): void {
         if (!distiller.hasPending(sessionId)) sessionLlm.delete(sessionId)
       })
     }
-    cmdCtx.effect(() => commands.register(buildWikiCommand(service, mutate as never, resolveAsk, resolveLlm, manualDistill)), 'llmwiki: /wiki')
+    cmdCtx.effect(() => commands.register(buildTopicsCommand(service, mutate as never, resolveAsk, resolveLlm, manualDistill)), 'topics: /topics')
   })
 }
 
 /** Config defaults for harnesses that skip schemastery's default application. */
-const DEFAULTS: LlmwikiConfigValue = {
+const DEFAULTS: TopicsConfigValue = {
   repo: '',
   autoInject: true,
   injectDedup: true,

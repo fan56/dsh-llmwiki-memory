@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BundleStore } from '../lib/store.js'
-import { WikiService } from '../lib/service.js'
+import { TopicsService } from '../lib/service.js'
 import { Observer } from '../lib/observer.js'
 
 function make() {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-obs-'))
+  const root = mkdtempSync(join(tmpdir(), 'topics-obs-'))
   const store = new BundleStore(root)
   let cfg = {
     repo: '', autoInject: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
@@ -16,7 +16,7 @@ function make() {
     autoObserve: true, observationMaxChars: 2000, distillEveryTurns: 3,
     distillOnSessionEnd: true, distillProvider: '', distillModel: '', pushDebounceSeconds: 45,
   }
-  const service = new WikiService(store, () => cfg)
+  const service = new TopicsService(store, () => cfg)
   const requests = []
   const observer = new Observer(service, (sessionId, reason) => requests.push({ sessionId, reason }))
   const cleanup = () => rmSync(root, { recursive: true, force: true })
@@ -169,11 +169,11 @@ test('observer: truncation bounds long turns', async () => {
 })
 
 test('observer: throwing service never propagates into the session loop', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-obs-th-'))
+  const root = mkdtempSync(join(tmpdir(), 'topics-obs-th-'))
   try {
     const store = new BundleStore(root)
     store.appendObservation = () => Promise.reject(new Error('disk full'))
-    const service = new WikiService(store, () => ({
+    const service = new TopicsService(store, () => ({
       repo: '', autoInject: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
       matchThreshold: 0.3, tagBoost: 0.15, graphDepth: 2, recencyWindowDays: 7,
       autoObserve: true, observationMaxChars: 2000, distillEveryTurns: 0,

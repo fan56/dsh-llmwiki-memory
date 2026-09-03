@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process'
 import * as git from '../lib/git.js'
 
 function tmp() {
-  const dir = mkdtempSync(join(tmpdir(), 'llmwiki-git-'))
+  const dir = mkdtempSync(join(tmpdir(), 'topics-git-'))
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
@@ -91,7 +91,7 @@ test('git: pull rebase fast-forwards from a bare remote; push publishes', async 
 
 test('git: pull conflict is contained (abort + conflicted paths reported)', async () => {
   const a = tmp()
-  const bare = mkdtempSync(join(tmpdir(), 'llmwiki-bare-'))
+  const bare = mkdtempSync(join(tmpdir(), 'topics-bare-'))
   const b = tmp()
   try {
     await git.initRepo(a.dir)

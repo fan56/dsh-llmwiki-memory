@@ -18,7 +18,7 @@ permissions:
 jobs:
   publish:
     name: Gate, Smoke & Publish
-    if: github.repository == 'fan56/dsh-llmwiki-memory'
+    if: github.repository == 'fan56/dsh-topics-memory'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -60,7 +60,7 @@ jobs:
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           npm version "${TAG_VERSION}" --no-git-tag-version --allow-same-version
-          echo "publishing @aiwayds/dsh-llmwiki-memory@${TAG_VERSION} (tag ${GITHUB_REF_NAME})"
+          echo "publishing @aiwayds/dsh-topics-memory@${TAG_VERSION} (tag ${GITHUB_REF_NAME})"
 
       - name: Publish to npm
         # Idempotent: skip when the version is already on the registry, and
@@ -68,8 +68,8 @@ jobs:
         # errors 403/404) as "let the verify step decide".
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if npm view "@aiwayds/dsh-llmwiki-memory@${TAG_VERSION}" version >/dev/null 2>&1; then
-            echo "::warning::@aiwayds/dsh-llmwiki-memory@${TAG_VERSION} is already on npm — skipping publish"
+          if npm view "@aiwayds/dsh-topics-memory@${TAG_VERSION}" version >/dev/null 2>&1; then
+            echo "::warning::@aiwayds/dsh-topics-memory@${TAG_VERSION} is already on npm — skipping publish"
             exit 0
           fi
           set +e
@@ -91,14 +91,14 @@ jobs:
                     # First publish propagates through npm's CDN for minutes; the
           # 30s window once failed a release that HAD landed. Budget 5 min.
           for attempt in $(seq 1 30); do
-            if npm view "@aiwayds/dsh-llmwiki-memory@${TAG_VERSION}" version >/dev/null 2>&1; then
-              echo "verified: @aiwayds/dsh-llmwiki-memory@${TAG_VERSION} is visible on the registry (attempt ${attempt})"
+            if npm view "@aiwayds/dsh-topics-memory@${TAG_VERSION}" version >/dev/null 2>&1; then
+              echo "verified: @aiwayds/dsh-topics-memory@${TAG_VERSION} is visible on the registry (attempt ${attempt})"
               exit 0
             fi
             echo "attempt ${attempt}: not visible yet; waiting 10s"
             sleep 10
           done
-          echo "::error::publish reported success but npm view never saw @aiwayds/dsh-llmwiki-memory@${TAG_VERSION} — inspect the registry manually before trusting this release"
+          echo "::error::publish reported success but npm view never saw @aiwayds/dsh-topics-memory@${TAG_VERSION} — inspect the registry manually before trusting this release"
           exit 1
 
   release:

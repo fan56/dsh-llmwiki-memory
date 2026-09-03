@@ -50,7 +50,7 @@ export interface SearchHit {
 
 export interface SearchOutcome {
   hits: SearchHit[]
-  /** Below threshold but close — the tuning evidence for /wiki stats (ADR 0007). */
+  /** Below threshold but close — the tuning evidence for /topics stats (ADR 0007). */
   nearMisses: SearchHit[]
   rosterSize: number
 }

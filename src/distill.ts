@@ -11,7 +11,7 @@
  */
 
 import * as okf from './okf.ts'
-import type { WikiService } from './service.ts'
+import type { TopicsService } from './service.ts'
 
 export interface ModelRequest {
   system: string
@@ -123,14 +123,14 @@ interface AppliedOps {
 
 export class Distiller {
   private inFlight = new Map<string, Promise<DistillResult>>()
-  private readonly service: WikiService
+  private readonly service: TopicsService
   private readonly caller: ModelCaller | undefined
   /** Live batch size — adopted from config each run, shrunk on output-limit failures. */
   private batchSize = DEFAULT_BATCH_SIZE
   /** Config value the live batch size was adopted from; a config change resets the shrink state. */
   private batchSizeBase = DEFAULT_BATCH_SIZE
 
-  constructor(service: WikiService, caller: ModelCaller | undefined) {
+  constructor(service: TopicsService, caller: ModelCaller | undefined) {
     this.service = service
     this.caller = caller
   }
@@ -138,7 +138,7 @@ export class Distiller {
   /**
    * Adopt the configured batch size for this run. The shrink state sticks
    * across runs (a model that overflowed at 40 stays at 20 until restart),
-   * but an explicit config change resets it — /wiki set is the manual
+   * but an explicit config change resets it — /topics set is the manual
    * grow-back lever, so the lane needs no speculative auto-recovery that
    * would just re-pay a failed call on every run.
    */
@@ -158,7 +158,7 @@ export class Distiller {
    * Returns the run promise (undefined when deduped or unconfigured) so the
    * caller can hook post-run cleanup — the per-session llm capture in
    * index.ts must live exactly as long as a run that may read it. `manual`
-   * is the /wiki distill trigger: same lane, same in-flight guard.
+   * is the /topics distill trigger: same lane, same in-flight guard.
    */
   request(sessionId: string, reason: 'every-n' | 'session-end' | 'manual'): Promise<DistillResult> | undefined {
     if (!this.configured) return undefined
@@ -181,7 +181,7 @@ export class Distiller {
 
   async run(sessionId?: string): Promise<DistillResult> {
     const result = await this.runInner(sessionId)
-    // The GC count rides the detail (and the state file) so /wiki status and
+    // The GC count rides the detail (and the state file) so /topics status and
     // e2e diagnostics see how many observations were deleted, not just marked.
     const gcNote =
       result.gcDropped !== undefined && result.gcDropped > 0
@@ -189,7 +189,7 @@ export class Distiller {
         : ''
     const detail =
       result.detail === undefined ? (gcNote === '' ? undefined : gcNote.replace(/^；/, '')) : `${result.detail}${gcNote}`
-    // Persist the outcome — /wiki status and e2e diagnostics both read it.
+    // Persist the outcome — /topics status and e2e diagnostics both read it.
     // A failed write must not masquerade as success: the marks have already
     // landed, so the only witness left is the run detail the command output
     // shows. Surface the write error there instead of swallowing it.
@@ -218,11 +218,11 @@ export class Distiller {
       return { ok: false, reason: 'no-model', created: [], updated: [], marked: 0 }
     }
     // Route gate — checked PER RUN here rather than once at wiring time, so
-    // `/wiki set distill-provider` stays live without a plugin reload. An
+    // `/topics set distill-provider` stays live without a plugin reload. An
     // empty route must never start lane bookkeeping: a GC attempt recorded
     // against a lane that cannot call the model would turn three automatic
     // triggers into data deletion. Short-circuit BEFORE the first fetch,
-    // with the readable reason /wiki distill surfaces.
+    // with the readable reason /topics distill surfaces.
     const routeCfg = this.service.cfg
     if ((routeCfg.distillProvider ?? '') === '' || (routeCfg.distillModel ?? '') === '') {
       return {
@@ -444,7 +444,7 @@ export class Distiller {
       return { created: [], updated: [], marked: 0, fatalReason: 'model-error', detail: 'distill caller unavailable' }
     }
     try {
-      raw = await caller({ system: SYSTEM_PROMPT, user, purpose: 'llmwiki-distill', sessionId, maxTokens: 4000 })
+      raw = await caller({ system: SYSTEM_PROMPT, user, purpose: 'topics-distill', sessionId, maxTokens: 4000 })
     } catch (e) {
       const detail = String(e instanceof Error ? e.message : e).slice(0, 200)
       return isMaxTokens(e)
@@ -557,7 +557,7 @@ export class Distiller {
     ].join('\n')
     let raw: string
     try {
-      raw = await caller({ system: SYSTEM_PROMPT, user, purpose: 'llmwiki-distill', sessionId, maxTokens: 4000 })
+      raw = await caller({ system: SYSTEM_PROMPT, user, purpose: 'topics-distill', sessionId, maxTokens: 4000 })
     } catch (e) {
       return { why: `模型调用失败：${String(e instanceof Error ? e.message : e).slice(0, 160)}` }
     }
@@ -804,7 +804,7 @@ function isMaxTokens(error: unknown): boolean {
  * captured instance first, then the session-wide capture and the apply-time
  * root; the first one whose live routes prove the configured provider wins.
  * The configured-route gate is NOT here: `Distiller.runInner` checks the
- * route per run (so `/wiki set distill-provider` stays live without a
+ * route per run (so `/topics set distill-provider` stays live without a
  * reload); this closure's own route check at call time is defense-in-depth
  * for direct callers.
  *
@@ -833,7 +833,7 @@ export function defaultModelCaller(
     const messages = [
       createUserMessage({
         content: [{ type: 'text', text: req.user }],
-        source: { kind: 'plugin', plugin: 'dsh-llmwiki-memory' },
+        source: { kind: 'plugin', plugin: 'dsh-topics-memory' },
       }),
     ]
     const options = deepFreeze({

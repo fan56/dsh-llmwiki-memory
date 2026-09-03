@@ -1,5 +1,5 @@
 /**
- * WikiService — the facade shared by tools, commands, the injection seam,
+ * TopicsService — the facade shared by tools, commands, the injection seam,
  * and the distill lane. Owns the roster cache (mtime-keyed, pi-topic-memory
  * lesson #3: never re-parse unchanged files on the hot path).
  *
@@ -13,7 +13,7 @@ import * as okf from './okf.ts'
 import { searchTopics, tokenize, type RetrievableTopic, type SearchOutcome } from './retrieval.ts'
 import { assembleInjection, type AssembleResult, type DigestInput } from './digest.ts'
 import type { BundleStore, Observation, SaveResult } from './store.ts'
-import type { LlmwikiConfigValue } from './config.ts'
+import type { TopicsConfigValue } from './config.ts'
 import { aggregateStats, querySample, type AggregateStats, type InjectionRecord } from './ilog.ts'
 import { fileHistory, fileAtRev } from './git.ts'
 import type { Sync } from './sync.ts'
@@ -32,19 +32,19 @@ export interface RetrieveOutcome {
   recorded: boolean
 }
 
-export class WikiService {
+export class TopicsService {
   private cache = new Map<string, CacheEntry>()
   readonly store: BundleStore
-  private readonly getConfig: () => LlmwikiConfigValue
+  private readonly getConfig: () => TopicsConfigValue
   readonly sync?: Sync
 
-  constructor(store: BundleStore, getConfig: () => LlmwikiConfigValue, sync?: Sync) {
+  constructor(store: BundleStore, getConfig: () => TopicsConfigValue, sync?: Sync) {
     this.store = store
     this.getConfig = getConfig
     this.sync = sync
   }
 
-  get cfg(): LlmwikiConfigValue {
+  get cfg(): TopicsConfigValue {
     return this.getConfig()
   }
 
@@ -323,7 +323,7 @@ export class WikiService {
     if (existing !== undefined && existing.fm.verified !== undefined) fm.verified = existing.fm.verified
     const result = await this.store.saveTopic(
       { slug, doc: { fm, body } },
-      { message: existing === undefined ? `wiki(topic): create ${slug}` : `wiki(topic): update ${slug}`, created: existing === undefined },
+      { message: existing === undefined ? `topics(topic): create ${slug}` : `topics(topic): update ${slug}`, created: existing === undefined },
     )
     this.invalidate()
     void this.sync?.schedulePush()

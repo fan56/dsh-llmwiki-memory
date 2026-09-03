@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BundleStore } from '../lib/store.js'
-import { WikiService } from '../lib/service.js'
-import { buildWikiCommand, tuningHint, HELP } from '../lib/commands.js'
+import { TopicsService } from '../lib/service.js'
+import { buildTopicsCommand, tuningHint, HELP } from '../lib/commands.js'
 
 function makeService(cfgOverrides = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-cmd-'))
+  const root = mkdtempSync(join(tmpdir(), 'topics-cmd-'))
   const store = new BundleStore(root)
   let cfg = {
     repo: '', autoInject: true, injectDedup: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
@@ -17,7 +17,7 @@ function makeService(cfgOverrides = {}) {
     distillOnSessionEnd: true, distillProvider: '', distillModel: '', pushDebounceSeconds: 45,
     ...cfgOverrides,
   }
-  const service = new WikiService(store, () => cfg)
+  const service = new TopicsService(store, () => cfg)
   const mutations = []
   const mutate = async (ops) => {
     mutations.push(ops)
@@ -68,13 +68,13 @@ function fakeLlm() {
   return llm
 }
 
-test('command: bare /wiki prints help', async () => {
+test('command: bare /topics prints help', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const r = await cmd.handler(inv(''))
     assert.equal(r.kind, 'success')
-    assert.match(r.text, /\/wiki status/)
+    assert.match(r.text, /\/topics status/)
     assert.equal(HELP.length > 100, true)
   } finally {
     cleanup()
@@ -85,7 +85,7 @@ test('command: status shows mode, counts, injection settings', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
     await service.store.ensure()
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const r = await cmd.handler(inv('status'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /local-only/)
@@ -101,7 +101,7 @@ test('command: stats empty vs populated + list + show', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
     await service.store.ensure()
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const empty = await cmd.handler(inv('stats'))
     assert.match(empty.text, /还没有注入记录/)
     await service.saveTopic({ title: 'alpha topic', conclusion: '结论 A' })
@@ -126,7 +126,7 @@ test('command: history works on git-backed bundle', async () => {
     await service.store.ensure()
     await service.saveTopic({ title: ' evolving ', conclusion: 'v1' })
     await service.saveTopic({ title: ' evolving ', conclusion: 'v2', slug: 'evolving' })
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const r = await cmd.handler(inv('history evolving'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /变更史/)
@@ -144,7 +144,7 @@ test('command: show renders backlinks section when referenced', async () => {
     await service.saveTopic({ title: 'base topic', conclusion: '见 [[ref-topic]] 与 [面板](topics/panel.md)。' })
     await service.saveTopic({ title: 'ref topic', conclusion: '被 base 引用', slug: 'ref-topic' })
     await service.saveTopic({ title: 'panel', conclusion: '被 base 引用', slug: 'panel' })
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const showRef = await cmd.handler(inv('show ref-topic'))
     assert.match(showRef.text, /反向引用/)
     assert.match(showRef.text, /base-topic（链接）/)
@@ -161,7 +161,7 @@ test('command: show renders backlinks section when referenced', async () => {
 test('command: sync refuses in local-only mode', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const r = await cmd.handler(inv('sync'))
     assert.equal(r.kind, 'error')
     assert.match(r.text, /local-only/)
@@ -173,7 +173,7 @@ test('command: sync refuses in local-only mode', async () => {
 test('command: config lists all keys; set validates and applies', async () => {
   const { service, mutate, mutations, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const cfgOut = await cmd.handler(inv('config'))
     for (const key of ['repo', 'inject-dedup', 'match-threshold', 'distill-model', 'push-debounce-seconds']) {
       assert.match(cfgOut.text, new RegExp(key.replace(/-/g, '\\-')))
@@ -208,21 +208,21 @@ test('command: config lists all keys; set validates and applies', async () => {
 test('command: unknown subaction errors with help', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const r = await cmd.handler(inv('frobnicate'))
     assert.equal(r.kind, 'error')
-    assert.match(r.text, /\/wiki status/)
+    assert.match(r.text, /\/topics status/)
   } finally {
     cleanup()
   }
 })
 
-// ---- /wiki set: distill-route text path (C — mixed-value split) ----
+// ---- /topics set: distill-route text path (C — mixed-value split) ----
 
 test('set distill-model: "provider model" space form splits into BOTH keys', async () => {
   const { service, mutations, mutate, cleanup, getCfg } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const r = await cmd.handler(inv('set distill-model zai-coding-cn glm-5.3-flash'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /distill-provider = zai-coding-cn/)
@@ -240,7 +240,7 @@ test('set distill-model: "provider model" space form splits into BOTH keys', asy
 test('set distill-model: provider/model slash form splits too; nested-slash models need the space form', async () => {
   const { service, mutations, mutate, cleanup, getCfg } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const slash = await cmd.handler(inv('set distill-model prov/m1'))
     assert.match(slash.text, /distill-provider = prov/)
     assert.equal(getCfg().distillModel, 'm1')
@@ -258,7 +258,7 @@ test('set distill-model: provider/model slash form splits too; nested-slash mode
 test('set distill-model: bare model name writes only distill-model', async () => {
   const { service, mutations, mutate, cleanup, getCfg } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const r = await cmd.handler(inv('set distill-model glm-5.3-flash'))
     assert.equal(r.kind, 'success')
     assert.doesNotMatch(r.text, /两个键/)
@@ -273,7 +273,7 @@ test('set distill-model: bare model name writes only distill-model', async () =>
 test('set distill-provider: only a single segment is accepted', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const spaced = await cmd.handler(inv('set distill-provider zai-coding-cn glm-5.3-flash'))
     assert.equal(spaced.kind, 'error')
     assert.match(spaced.text, /单段/)
@@ -288,13 +288,13 @@ test('set distill-provider: only a single segment is accepted', async () => {
   }
 })
 
-// ---- /wiki set: distill-route interactive path (B) ----
+// ---- /topics set: distill-route interactive path (B) ----
 
 test('set distill-provider without value opens the provider panel and writes the pick', async () => {
   const { service, mutations, mutate, cleanup, getCfg } = makeService()
   try {
     const ask = fakeAsk([[{ id: 'distill-provider', selected: ['prov'] }]])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [fakeLlm()])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [fakeLlm()])
     const r = await cmd.handler(inv('set distill-provider'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /distill-provider = prov/)
@@ -312,7 +312,7 @@ test('set distill-model without value lists the configured provider models; need
   const { service, mutations, mutate, cleanup, setCfg, getCfg } = makeService()
   try {
     const ask = fakeAsk([[{ id: 'distill-model', selected: ['m2'] }]])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [fakeLlm()])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [fakeLlm()])
     const noProvider = await cmd.handler(inv('set distill-model'))
     assert.equal(noProvider.kind, 'error')
     assert.match(noProvider.text, /先配置 distill-provider/)
@@ -335,13 +335,13 @@ test('set distill interactive: cancel and blank answer write nothing', async () 
   try {
     setCfg({ distillProvider: 'prov' })
     const cancelled = fakeAsk([])
-    const cmd = buildWikiCommand(service, mutate, () => cancelled, () => [fakeLlm()])
+    const cmd = buildTopicsCommand(service, mutate, () => cancelled, () => [fakeLlm()])
     const r = await cmd.handler(inv('set distill-model'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /已取消/)
     assert.equal(mutations.length, 0)
     const blank = fakeAsk([[{ id: 'distill-provider', selected: [] }]])
-    const cmd2 = buildWikiCommand(service, mutate, () => blank, () => [fakeLlm()])
+    const cmd2 = buildTopicsCommand(service, mutate, () => blank, () => [fakeLlm()])
     const r2 = await cmd2.handler(inv('set distill-provider'))
     assert.equal(r2.kind, 'success')
     assert.match(r2.text, /保持原样/)
@@ -355,7 +355,7 @@ test('set distill keys without value and without llm error out instead of cleari
   const { service, mutations, mutate, cleanup } = makeService()
   try {
     const ask = fakeAsk([])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [])
     const r = await cmd.handler(inv('set distill-provider'))
     assert.equal(r.kind, 'error')
     assert.match(r.text, /需要一个值/)
@@ -371,7 +371,7 @@ test('set distill keys without value: empty llm directory gets its own message',
   const { service, mutations, mutate, cleanup } = makeService()
   try {
     const emptyLlm = { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}) }
-    const cmd = buildWikiCommand(service, mutate, () => fakeAsk([]), () => [emptyLlm])
+    const cmd = buildTopicsCommand(service, mutate, () => fakeAsk([]), () => [emptyLlm])
     const r = await cmd.handler(inv('set distill-provider'))
     assert.equal(r.kind, 'error')
     assert.match(r.text, /需要一个值/)
@@ -393,7 +393,7 @@ test('set distill-provider without value picks the first candidate with a non-em
       resolveModelInfo: async (p, m) => ({ provider: p, id: m }),
     }
     const ask = fakeAsk([[{ id: 'distill-provider', selected: ['scoped-prov'] }]])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [rootEmpty, scopedLive])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [rootEmpty, scopedLive])
     const r = await cmd.handler(inv('set distill-provider'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /distill-provider = scoped-prov/)
@@ -404,7 +404,7 @@ test('set distill-provider without value picks the first candidate with a non-em
   }
 })
 
-// ---- /wiki set: distill-route panel validation (mirrors the wizard) ----
+// ---- /topics set: distill-route panel validation (mirrors the wizard) ----
 
 test('set distill-provider custom id outside the route table blocks and re-asks', async () => {
   const { service, mutations, mutate, cleanup, getCfg } = makeService()
@@ -413,7 +413,7 @@ test('set distill-provider custom id outside the route table blocks and re-asks'
       [{ id: 'distill-provider', custom: 'no-such-prov' }],
       [{ id: 'distill-provider', selected: ['prov'] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [fakeLlm()])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [fakeLlm()])
     const r = await cmd.handler(inv('set distill-provider'))
     assert.equal(r.kind, 'success')
     assert.equal(ask.calls.length, 2)
@@ -430,7 +430,7 @@ test('set distill-provider custom id: exhausting re-asks fails with zero writes'
   try {
     const answer = [{ id: 'distill-provider', custom: 'no-such-prov' }]
     const ask = fakeAsk([answer, answer, answer])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [fakeLlm()])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [fakeLlm()])
     const r = await cmd.handler(inv('set distill-provider'))
     assert.equal(r.kind, 'error')
     assert.match(r.text, /多次选择仍没有可用的模型路由/)
@@ -453,7 +453,7 @@ test('set distill-model: NO_ADAPTER blocks and re-asks; off-catalog failure warn
       return e
     }
     const ask = fakeAsk([[{ id: 'distill-model', selected: ['m1'] }], [{ id: 'distill-model', selected: ['m2'] }]])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [blocked])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [blocked])
     const r = await cmd.handler(inv('set distill-model'))
     assert.equal(r.kind, 'success')
     assert.equal(ask.calls.length, 2)
@@ -467,7 +467,7 @@ test('set distill-model: NO_ADAPTER blocks and re-asks; off-catalog failure warn
       return e
     }
     const ask2 = fakeAsk([[{ id: 'distill-model', custom: 'weird-model' }]])
-    const cmd2 = buildWikiCommand(service, mutate, () => ask2, () => [advisory])
+    const cmd2 = buildTopicsCommand(service, mutate, () => ask2, () => [advisory])
     const r2 = await cmd2.handler(inv('set distill-model'))
     assert.equal(r2.kind, 'success')
     assert.match(r2.text, /⚠️ weird-model 未通过 prov 的模型目录校验（模型目录外，可能仍可用），已放行/)
@@ -478,13 +478,13 @@ test('set distill-model: NO_ADAPTER blocks and re-asks; off-catalog failure warn
   }
 })
 
-// ---- /wiki set: mixed-value split overwrite notice ----
+// ---- /topics set: mixed-value split overwrite notice ----
 
 test('set distill-model split warns when it overwrites an existing distill-provider', async () => {
   const { service, mutations, mutate, cleanup, setCfg, getCfg } = makeService()
   try {
     setCfg({ distillProvider: 'old-prov' })
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const r = await cmd.handler(inv('set distill-model new-prov m1'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /⚠️ 已覆盖原 distill-provider «old-prov»/)
@@ -526,12 +526,12 @@ test('tuningHint: dense near-miss band just below threshold suggests lowering', 
   assert.equal(tuningHint(healthy, 0.3), undefined)
 })
 
-test('command: /wiki distill — unwired, empty pool, success summary, failure reason', async () => {
+test('command: /topics distill — unwired, empty pool, success summary, failure reason', async () => {
   const { service, mutate, store, cleanup } = makeService()
   try {
     await store.ensure()
     // Unwired lane → readable error, not a crash.
-    const bare = buildWikiCommand(service, mutate)
+    const bare = buildTopicsCommand(service, mutate)
     const r0 = await bare.handler(inv('distill'))
     assert.equal(r0.kind, 'error')
     assert.match(r0.text, /未接线/)
@@ -541,14 +541,14 @@ test('command: /wiki distill — unwired, empty pool, success summary, failure r
       laneCalls += 1
       return { ok: false, reason: 'no-observations', created: [], updated: [], marked: 0 }
     }
-    const cmd = buildWikiCommand(service, mutate, () => undefined, () => [], lane)
+    const cmd = buildTopicsCommand(service, mutate, () => undefined, () => [], lane)
     const r1 = await cmd.handler(inv('distill'))
     assert.equal(r1.kind, 'success')
     assert.match(r1.text, /观察池为空/)
     assert.equal(laneCalls, 0, 'an empty pool answers without touching the lane')
     // Populated pool → the summary mirrors the distill-state fields.
     await store.appendObservation({ kind: 'finding', source: 'auto', text: 'x' })
-    const r2 = await buildWikiCommand(service, mutate, () => undefined, () => [], async () => ({
+    const r2 = await buildTopicsCommand(service, mutate, () => undefined, () => [], async () => ({
       ok: true,
       created: ['t1'],
       updated: ['t2'],
@@ -563,13 +563,13 @@ test('command: /wiki distill — unwired, empty pool, success summary, failure r
     assert.match(r2.text, /GC 回收 1 条不可处理观察/)
     assert.match(r2.text, /partial/)
     // Lane failure → error result naming the reason.
-    const r3 = await buildWikiCommand(service, mutate, () => undefined, () => [], async () => ({
+    const r3 = await buildTopicsCommand(service, mutate, () => undefined, () => [], async () => ({
       ok: false, reason: 'in-flight', created: [], updated: [], marked: 0,
     })).handler(inv('distill'))
     assert.equal(r3.kind, 'error')
     assert.match(r3.text, /已有蒸馏在跑/)
     // The action is discoverable.
-    assert.match(HELP, /\/wiki distill/)
+    assert.match(HELP, /\/topics distill/)
   } finally {
     cleanup()
   }

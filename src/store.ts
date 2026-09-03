@@ -78,7 +78,7 @@ async function atomicWrite(file: string, content: string): Promise<void> {
 }
 
 export interface BundleStoreOptions {
-  /** Override the stamped actor (tests). Defaults to `agent:dsh-llmwiki-memory@<host>`. */
+  /** Override the stamped actor (tests). Defaults to `agent:dsh-topics-memory@<host>`. */
   actor?: string
   /** Disable git operations entirely (pure-filesystem tests). */
   gitDisabled?: boolean
@@ -132,7 +132,7 @@ export class BundleStore {
     return join(this.metaDir(), 'distill-state.json')
   }
 
-  /** Last distill-lane run outcome (diagnostics for /wiki status and e2e). */
+  /** Last distill-lane run outcome (diagnostics for /topics status and e2e). */
   async writeDistillState(state: unknown): Promise<void> {
     await mkdir(this.metaDir(), { recursive: true })
     await atomicWrite(this.distillStatePath(), `${JSON.stringify(state, null, 2)}\n`)
@@ -198,7 +198,7 @@ export class BundleStore {
     return metas
   }
 
-  /** Topics broken beyond parsing — surfaced by /wiki status, never silently dropped. */
+  /** Topics broken beyond parsing — surfaced by /topics status, never silently dropped. */
   async brokenTopics(): Promise<string[]> {
     let files: string[]
     try {
@@ -396,7 +396,7 @@ export class BundleStore {
       }
       if (changed > 0) {
         await atomicWrite(this.observationsPath(), all.map((o) => `${JSON.stringify(o)}\n`).join(''))
-        await this.commit(['meta/observations.jsonl'], `wiki(meta): distill ${ids.length} observation(s) into ${intoSlugs.join(', ')}`)
+        await this.commit(['meta/observations.jsonl'], `topics(meta): distill ${ids.length} observation(s) into ${intoSlugs.join(', ')}`)
       }
       return changed
     })
@@ -443,7 +443,7 @@ export class BundleStore {
         await atomicWrite(this.observationsPath(), kept.map((o) => `${JSON.stringify(o)}\n`).join(''))
       }
       if (dropped > 0) {
-        await this.commit(['meta/observations.jsonl'], `wiki(meta): gc ${dropped} unprocessable observation(s)`)
+        await this.commit(['meta/observations.jsonl'], `topics(meta): gc ${dropped} unprocessable observation(s)`)
       }
       return { dropped }
     })
@@ -527,7 +527,7 @@ export class BundleStore {
       } else {
         await atomicWrite(this.conflictsPath(), `${JSON.stringify([...paths], null, 2)}\n`)
       }
-      await this.commit(['meta/conflicts.json'], `wiki(meta): mark ${paths.length} conflicted topic(s)`)
+      await this.commit(['meta/conflicts.json'], `topics(meta): mark ${paths.length} conflicted topic(s)`)
     })
   }
 

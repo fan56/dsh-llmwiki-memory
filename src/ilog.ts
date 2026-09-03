@@ -1,6 +1,6 @@
 /**
  * Injection log (ADR 0007) — one record per retrieval round, no conversation
- * text, only features and decisions. Aggregations power `/wiki stats` and the
+ * text, only features and decisions. Aggregations power `/topics stats` and the
  * near-miss evidence that makes threshold tuning measurable.
  *
  * @module ilog

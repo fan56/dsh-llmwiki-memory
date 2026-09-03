@@ -41,9 +41,9 @@ const opFor = (title, obsId) =>
  * adapter-holding llm instance.
  */
 function bootPlugin(overrides = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-scope-'))
-  const prevHome = process.env.DSH_LLMWIKI_HOME
-  process.env.DSH_LLMWIKI_HOME = root
+  const root = mkdtempSync(join(tmpdir(), 'topics-scope-'))
+  const prevHome = process.env.DSH_TOPICS_HOME
+  process.env.DSH_TOPICS_HOME = root
   const handlers = []
   const disposedHandlers = {}
   const contexts = []
@@ -76,8 +76,8 @@ function bootPlugin(overrides = {}) {
     else handler({ id: sessionId })
   }
   const cleanup = () => {
-    if (prevHome === undefined) delete process.env.DSH_LLMWIKI_HOME
-    else process.env.DSH_LLMWIKI_HOME = prevHome
+    if (prevHome === undefined) delete process.env.DSH_TOPICS_HOME
+    else process.env.DSH_TOPICS_HOME = prevHome
     rmSync(root, { recursive: true, force: true })
   }
   return { root, agentsMap, dispatch, dispose, effects, cleanup }
@@ -219,7 +219,7 @@ test('lifecycle: the effect disposer awaits the exit distill before resolving', 
     // The exit path triggers under the fake 'dispose' session id — its agent
     // entry is where the trigger-time llm capture finds the instance.
     h.agentsMap.set('dispose', { id: 'dispose', inbox: { nextTurn: [], nextStep: [] }, ctx: { llm } })
-    const lifecycle = h.effects.find((e) => e.name === 'llmwiki: lifecycle')
+    const lifecycle = h.effects.find((e) => e.name === 'topics: lifecycle')
     assert.ok(lifecycle !== undefined, 'the lifecycle effect is registered')
     const disposer = lifecycle.setup()
     const start = Date.now()
@@ -276,7 +276,7 @@ test('lifecycle: the exit dispose trigger is skipped while a session-end run is 
     await waitFor(() => endCalls === 1, 'the session-end run reached the (held) model call')
 
     // Exit while it is in flight: the guard must skip the dispose trigger.
-    const lifecycle = h.effects.find((e) => e.name === 'llmwiki: lifecycle')
+    const lifecycle = h.effects.find((e) => e.name === 'topics: lifecycle')
     assert.ok(lifecycle !== undefined, 'the lifecycle effect is registered')
     const disposer = lifecycle.setup()
     const start = Date.now()

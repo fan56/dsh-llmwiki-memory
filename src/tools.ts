@@ -6,7 +6,7 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { WikiService } from './service.ts'
+import type { TopicsService } from './service.ts'
 
 const STRING_ARRAY = { type: 'array', items: { type: 'string' } } as const
 
@@ -15,7 +15,7 @@ function preview(text: string, max = 240): string {
   return line.length <= max ? line : `${line.slice(0, max)}…`
 }
 
-export function buildTopicTools(service: WikiService) {
+export function buildTopicTools(service: TopicsService) {
   const topicSave = defineTool({
     name: 'topic_save',
     description:

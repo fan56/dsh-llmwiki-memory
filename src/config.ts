@@ -1,13 +1,13 @@
 /**
- * Plugin configuration — the `llmwiki` settings namespace, user-editable in
- * settings.yaml and via `/wiki set` (ADR 0006/0007 tunables).
+ * Plugin configuration — the `topics` settings namespace, user-editable in
+ * settings.yaml and via `/topics set` (ADR 0006/0007 tunables).
  *
  * @module config
  */
 
 import z from '@deepseek-ai/schemastery'
 
-export const LlmwikiConfig = z.object({
+export const TopicsConfig = z.object({
   /** GitHub repo `owner/name`; empty = local-only mode (ADR 0008). */
   repo: z.string().default(''),
   /** Master switch for per-turn injection. */
@@ -20,7 +20,7 @@ export const LlmwikiConfig = z.object({
   perTopicBudget: z.number().default(300),
   /** Total injection budget in tokens. */
   totalBudget: z.number().default(1500),
-  /** Retrieval score threshold — tune via /wiki stats near-miss evidence. */
+  /** Retrieval score threshold — tune via /topics stats near-miss evidence. */
   matchThreshold: z.number().default(0.3),
   /** Additive boost per tag hit. */
   tagBoost: z.number().default(0.15),
@@ -51,7 +51,7 @@ export const LlmwikiConfig = z.object({
   pushDebounceSeconds: z.number().default(45),
 })
 
-export type LlmwikiConfigValue = {
+export type TopicsConfigValue = {
   repo: string
   autoInject: boolean
   injectDedup: boolean
@@ -104,7 +104,7 @@ export function displayKey(key: string): string {
   return key.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()
 }
 
-/** /wiki set <key> <value> — parse the raw string into the typed value. */
+/** /topics set <key> <value> — parse the raw string into the typed value. */
 export function parseConfigValue(key: ConfigKey, raw: string): boolean | number | string | { error: string } {
   switch (key) {
     case 'repo': {

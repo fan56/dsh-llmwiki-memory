@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BundleStore } from '../lib/store.js'
-import { WikiService } from '../lib/service.js'
+import { TopicsService } from '../lib/service.js'
 import { Distiller, SYSTEM_PROMPT, defaultModelCaller, parseOps, pickLiveLlm } from '../lib/distill.js'
 
 function make(cfgOverrides = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-distill-'))
+  const root = mkdtempSync(join(tmpdir(), 'topics-distill-'))
   const store = new BundleStore(root)
   let cfg = {
     repo: '', autoInject: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
@@ -20,7 +20,7 @@ function make(cfgOverrides = {}) {
     distillProvider: 'p', distillModel: 'm', pushDebounceSeconds: 45,
     ...cfgOverrides,
   }
-  const service = new WikiService(store, () => cfg)
+  const service = new TopicsService(store, () => cfg)
   const cleanup = () => rmSync(root, { recursive: true, force: true })
   return { root, store, service, cleanup }
 }
@@ -120,7 +120,7 @@ test('distiller: create + update ops land, observations marked distilled', async
       assert.match(req.system, /蒸馏引擎/)
       assert.match(req.user, /未蒸馏观察/)
       assert.ok(req.user.includes(o1.id), 'observation ids included in prompt')
-      assert.equal(req.purpose, 'llmwiki-distill')
+      assert.equal(req.purpose, 'topics-distill')
       return modelJson
     })
     const r = await d.run('s1')

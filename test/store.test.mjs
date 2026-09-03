@@ -7,7 +7,7 @@ import { BundleStore } from '../lib/store.js'
 import { parseTopicDoc } from '../lib/okf.js'
 
 function tmpStore(opts = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-store-'))
+  const root = mkdtempSync(join(tmpdir(), 'topics-store-'))
   return { store: new BundleStore(root, { gitDisabled: true, ...opts }), root, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
@@ -55,7 +55,7 @@ test('store: save/list/read topic round-trip + index', async () => {
     const read = await store.readTopic('alpha')
     assert.equal(read.fm.title, 'Alpha 主题 v2')
     // generated stamped by the store actor on save (machine provenance)
-    assert.match(read.fm.generated.by, /^agent:dsh-llmwiki-memory@/)
+    assert.match(read.fm.generated.by, /^agent:dsh-topics-memory@/)
     const index = await readFile(indexPath(store), 'utf8')
     assert.match(index, /alpha/)
   } finally {

@@ -1,4 +1,4 @@
-# dsh-llmwiki-memory
+# dsh-topics-memory
 
 一个 dsh 插件：把「工作 topic 记忆」维护成 OKF 标准（Open Knowledge Format v0.2）的知识 bundle，持久化在 GitHub 私有仓库，本地缓存，利用 git 历史提供结论可追溯性，并在每轮对话前向模型注入相关 Topic。
 

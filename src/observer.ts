@@ -16,8 +16,8 @@
  * @module observer
  */
 
-import type { WikiService } from './service.ts'
-import type { LlmwikiConfigValue } from './config.ts'
+import type { TopicsService } from './service.ts'
+import type { TopicsConfigValue } from './config.ts'
 
 interface SessionState {
   turnCount: number
@@ -47,10 +47,10 @@ export class Observer {
   private sessions = new Map<string, SessionState>()
   /** Sessions whose end trigger already fired; cleared on the resume boundary. */
   private ended = new Set<string>()
-  private readonly service: WikiService
+  private readonly service: TopicsService
   private readonly onRequestDistill: (sessionId: string, reason: 'every-n' | 'session-end') => void
 
-  constructor(service: WikiService, onRequestDistill: (sessionId: string, reason: 'every-n' | 'session-end') => void) {
+  constructor(service: TopicsService, onRequestDistill: (sessionId: string, reason: 'every-n' | 'session-end') => void) {
     this.service = service
     this.onRequestDistill = onRequestDistill
   }

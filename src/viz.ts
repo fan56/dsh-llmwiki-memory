@@ -80,7 +80,7 @@ const PAGE = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dsh-llmwiki-memory 关系图</title>
+<title>dsh-topics-memory 关系图</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; margin: 0; }
@@ -112,7 +112,7 @@ const PAGE = `<!DOCTYPE html>
 </head>
 <body>
 <div id="bar">
-  <h1>dsh-llmwiki-memory 关系图</h1>
+  <h1>dsh-topics-memory 关系图</h1>
   <input id="q" type="search" placeholder="搜索标题 / slug…">
   <select id="tag"><option value="">全部标签</option></select>
   <div class="legend">

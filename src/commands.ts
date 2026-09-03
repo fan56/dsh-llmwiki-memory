@@ -1,5 +1,5 @@
 /**
- * `/wiki` slash command family — status | stats | list | show | history |
+ * `/topics` slash command family — status | stats | list | show | history |
  * sync | config | set. Registered through the shared dsh-commands registry
  * as an optional peer (vault pattern): hosts without it still load the plugin.
  *
@@ -10,11 +10,11 @@ import type { CommandDefinition, CommandInvocation, CommandResult } from '@deeps
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
-import type { WikiService } from './service.ts'
+import type { TopicsService } from './service.ts'
 import type { DistillResult } from './distill.ts'
 import { serializeTopicDoc, slugify, firstParagraph } from './okf.ts'
 import { buildGraph, renderGraphHtml } from './viz.ts'
-import { CONFIG_KEYS, displayKey, type ConfigKey, type LlmwikiConfigValue, parseConfigValue } from './config.ts'
+import { CONFIG_KEYS, displayKey, type ConfigKey, type TopicsConfigValue, parseConfigValue } from './config.ts'
 import { aggregateStats } from './ilog.ts'
 import {
   askDistillSingle,
@@ -31,41 +31,41 @@ import {
 } from './onboard.ts'
 
 /**
- * Manual `/wiki distill` trigger, wired by the host (index.ts owns the lane
+ * Manual `/topics distill` trigger, wired by the host (index.ts owns the lane
  * instance). Returns the lane's own result shape; rejections surface through
  * the command's normal error path.
  */
 export type ManualDistill = (invocation: CommandInvocation) => Promise<DistillResult>
 
 export const HELP = [
-  'dsh-llmwiki-memory — OKF topic 记忆（本地 bundle，git 可追溯，可选 GitHub 同步）',
-  '  /wiki onboard             交互式配置向导（ask-user 面板逐项问答；无 UI 环境逐条输入）',
-  '  /wiki status              bundle 健康：topic 数、观察积压、冲突、同步状态',
-  '  /wiki distill             手动触发一次蒸馏（观察池 → Topic，输出 marked/created/updated/gc 摘要）',
-  '  /wiki stats               注入统计：hit rate、top-N、near-miss 分布与调参建议',
-  '  /wiki list                列出全部 Topic',
-  '  /wiki show <slug>         查看一个 Topic 全文（含反向引用）',
-  '  /wiki history <slug>      一个 Topic 的结论变更史（git log）',
-  '  /wiki graph               生成关系图网页并在浏览器打开',
-  '  /wiki sync [pull|push]    GitHub 模式：手动拉取/推送（默认模式自动）',
-  '  /wiki config              查看当前配置',
-  '  /wiki set <key> <value>   修改配置；key: ' + CONFIG_KEYS.join(' | '),
+  'dsh-topics-memory — OKF topic 记忆（本地 bundle，git 可追溯，可选 GitHub 同步）',
+  '  /topics onboard             交互式配置向导（ask-user 面板逐项问答；无 UI 环境逐条输入）',
+  '  /topics status              bundle 健康：topic 数、观察积压、冲突、同步状态',
+  '  /topics distill             手动触发一次蒸馏（观察池 → Topic，输出 marked/created/updated/gc 摘要）',
+  '  /topics stats               注入统计：hit rate、top-N、near-miss 分布与调参建议',
+  '  /topics list                列出全部 Topic',
+  '  /topics show <slug>         查看一个 Topic 全文（含反向引用）',
+  '  /topics history <slug>      一个 Topic 的结论变更史（git log）',
+  '  /topics graph               生成关系图网页并在浏览器打开',
+  '  /topics sync [pull|push]    GitHub 模式：手动拉取/推送（默认模式自动）',
+  '  /topics config              查看当前配置',
+  '  /topics set <key> <value>   修改配置；key: ' + CONFIG_KEYS.join(' | '),
   '  （distill-provider / distill-model 不带 value 且有 ask UI + 可用模型路由时弹选择面板；distill-model 支持 "provider model" 混写自动拆分）',
   '',
   '凭据：$GITHUB_TOKEN 或已登录的 gh CLI；登录不在本插件职责内。',
 ].join('\n')
 
-export function buildWikiCommand(service: WikiService, mutate: MutateFn, resolveAsk: AskServiceResolver = () => undefined, resolveLlm: LlmDirectoryResolver = () => [], distillNow?: ManualDistill): CommandDefinition {
+export function buildTopicsCommand(service: TopicsService, mutate: MutateFn, resolveAsk: AskServiceResolver = () => undefined, resolveLlm: LlmDirectoryResolver = () => [], distillNow?: ManualDistill): CommandDefinition {
   const onboard = createOnboardHandler(service, mutate, undefined, resolveAsk, resolveLlm)
   return {
-    name: 'wiki',
+    name: 'topics',
     description: 'OKF topic 记忆：onboard | distill | status | stats | list | show | history | graph | sync | config | set',
     input: { hint: '[onboard | distill | status | stats | list | show <slug> | history <slug> | graph | sync [pull|push] | config | set <key> <value>]' },
     handler: (invocation) => handle(invocation, service, mutate, onboard, resolveAsk, resolveLlm, distillNow),
   }
 }
 
-async function handle(invocation: CommandInvocation, service: WikiService, mutate: MutateFn, onboard: (args: string[], invocation: CommandInvocation) => Promise<CommandResult>, resolveAsk: AskServiceResolver, resolveLlm: LlmDirectoryResolver, distillNow?: ManualDistill): Promise<CommandResult> {
+async function handle(invocation: CommandInvocation, service: TopicsService, mutate: MutateFn, onboard: (args: string[], invocation: CommandInvocation) => Promise<CommandResult>, resolveAsk: AskServiceResolver, resolveLlm: LlmDirectoryResolver, distillNow?: ManualDistill): Promise<CommandResult> {
   const raw = invocation.rawInput.trim()
   const [action = '', ...rest] = raw.split(/\s+/)
   try {
@@ -99,7 +99,7 @@ async function handle(invocation: CommandInvocation, service: WikiService, mutat
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return fail(`wiki ${action} 失败：${message}`)
+    return fail(`topics ${action} 失败：${message}`)
   }
 }
 
@@ -111,11 +111,11 @@ function fail(text: string): CommandResult {
   return { kind: 'error', text }
 }
 
-async function renderStatus(service: WikiService): Promise<string> {
+async function renderStatus(service: TopicsService): Promise<string> {
   const s = await service.store.status()
   const cfg = service.cfg
   const lines = [
-    `dsh-llmwiki-memory @ ${s.root}`,
+    `dsh-topics-memory @ ${s.root}`,
     `  模式：${service.githubMode ? `github（${cfg.repo}）` : 'local-only'}`,
     `  Topics：${s.topicCount}（draft ${s.byStatus.draft} / stable ${s.byStatus.stable} / deprecated ${s.byStatus.deprecated}）`,
     `  观察积压：${s.observationsPending} 未蒸馏 / ${s.observationsTotal} 总量`,
@@ -124,10 +124,10 @@ async function renderStatus(service: WikiService): Promise<string> {
     `  git：${s.git ? `是（HEAD ${s.head?.slice(0, 10) ?? '??'}）` : '否'}`,
     `  注入：${cfg.autoInject ? `开（topK ${cfg.topK}，预算 ${cfg.totalBudget} tok，阈值 ${cfg.matchThreshold}）` : '关'}`,
     `  去重：${cfg.injectDedup ? '开（同会话已注入的 Topic 不重注）' : '关'}`,
-    `  蒸馏：${cfg.distillProvider !== '' && cfg.distillModel !== '' ? `${cfg.distillProvider}/${cfg.distillModel}，每 ${cfg.distillEveryTurns} 轮` : '未配置模型（/wiki set distill-provider / distill-model）'}`,
+    `  蒸馏：${cfg.distillProvider !== '' && cfg.distillModel !== '' ? `${cfg.distillProvider}/${cfg.distillModel}，每 ${cfg.distillEveryTurns} 轮` : '未配置模型（/topics set distill-provider / distill-model）'}`,
   ]
   // Last lane outcome (distill-state summary) — what "checkable via
-  // /wiki status" promises; absent until the first run of this bundle.
+  // /topics status" promises; absent until the first run of this bundle.
   const lastRun = await service.store.readDistillState()
   if (lastRun !== undefined) {
     const outcome =
@@ -145,12 +145,12 @@ async function renderStatus(service: WikiService): Promise<string> {
 }
 
 /**
- * `/wiki distill` — one manual distill run over the current observation pool.
+ * `/topics distill` — one manual distill run over the current observation pool.
  * The empty-pool case answers immediately without touching the lane; the
  * summary mirrors the distill state fields (ok / marked / created / updated /
  * gc dropped / reason) so what the user sees is what the state file records.
  */
-async function doDistill(service: WikiService, invocation: CommandInvocation, distillNow: ManualDistill | undefined): Promise<CommandResult> {
+async function doDistill(service: TopicsService, invocation: CommandInvocation, distillNow: ManualDistill | undefined): Promise<CommandResult> {
   if (distillNow === undefined) return fail('蒸馏 lane 未接线（宿主未提供手动蒸馏触发器）')
   const pending = await service.store.undistilledObservations(1)
   if (pending.length === 0) return ok('观察池为空（no-observations）：没有未蒸馏的观察，无需触发。')
@@ -160,7 +160,7 @@ async function doDistill(service: WikiService, invocation: CommandInvocation, di
       result.reason === 'no-observations'
         ? '观察池为空（no-observations）'
         : result.reason === 'no-model'
-          ? '蒸馏模型未配置（/wiki set distill-provider / distill-model）'
+          ? '蒸馏模型未配置（/topics set distill-provider / distill-model）'
           : result.reason === 'in-flight'
             ? '已有蒸馏在跑，稍后再试'
             : (result.reason ?? 'unknown')
@@ -171,7 +171,7 @@ async function doDistill(service: WikiService, invocation: CommandInvocation, di
   return ok(`✅ 蒸馏完成：${parts.join('；')}${result.detail !== undefined ? `\n   ${result.detail}` : ''}`)
 }
 
-async function renderStats(service: WikiService): Promise<string> {
+async function renderStats(service: TopicsService): Promise<string> {
   const records = await service.store.readInjectionRecords()
   const stats = aggregateStats(records as never)
   if (records.length === 0) return '还没有注入记录 —— 用起来之后这里会有 hit rate / top-N / near-miss 分布。'
@@ -200,14 +200,14 @@ export function tuningHint(stats: ReturnType<typeof aggregateStats>, threshold: 
   const justBelow = stats.nearMissHistogram.filter((b) => Number(b.bucket.split('–')[0]) >= threshold - 0.15 && Number(b.bucket.split('–')[0]) < threshold)
   const justBelowCount = justBelow.reduce((acc, b) => acc + b.count, 0)
   if (stats.rounds >= 20 && justBelowCount >= stats.rounds * 0.3 && stats.hitRate < 0.5) {
-    return `near-miss 集中在阈值 ${threshold} 下方（${justBelowCount} 次），可尝试 /wiki set match-threshold ${(Math.max(0.05, threshold - 0.1)).toFixed(2)}`
+    return `near-miss 集中在阈值 ${threshold} 下方（${justBelowCount} 次），可尝试 /topics set match-threshold ${(Math.max(0.05, threshold - 0.1)).toFixed(2)}`
   }
   return undefined
 }
 
-async function renderList(service: WikiService): Promise<string> {
+async function renderList(service: TopicsService): Promise<string> {
   const metas = await service.store.listTopics()
-  if (metas.length === 0) return 'Bundle 里还没有 Topic —— 在会话里让我记点什么，或 /wiki set 配置好蒸馏。'
+  if (metas.length === 0) return 'Bundle 里还没有 Topic —— 在会话里让我记点什么，或 /topics set 配置好蒸馏。'
   const lines = [`共 ${metas.length} 个 Topic：`]
   for (const m of metas.sort((a, b) => a.slug.localeCompare(b.slug))) {
     lines.push(`  ${m.slug}  [${m.status}] ${m.title}${m.tags.length > 0 ? `  #${m.tags.join(' #')}` : ''}`)
@@ -215,10 +215,10 @@ async function renderList(service: WikiService): Promise<string> {
   return lines.join('\n')
 }
 
-async function renderShow(service: WikiService, slug: string | undefined): Promise<CommandResult> {
-  if (slug === undefined || slug === '') return fail('用法：/wiki show <slug>')
+async function renderShow(service: TopicsService, slug: string | undefined): Promise<CommandResult> {
+  if (slug === undefined || slug === '') return fail('用法：/topics show <slug>')
   const doc = await service.store.readTopic(slug)
-  if (doc === undefined) return fail(`Topic “${slug}” 不存在（/wiki list 查看）`)
+  if (doc === undefined) return fail(`Topic “${slug}” 不存在（/topics list 查看）`)
   const text = serializeTopicDoc(doc)
   const backlinks = await service.store.readBacklinks()
   const refs = backlinks[slugify(slug)] ?? []
@@ -233,8 +233,8 @@ async function renderShow(service: WikiService, slug: string | undefined): Promi
   return ok(lines.join('\n'))
 }
 
-async function renderHistory(service: WikiService, slug: string | undefined): Promise<CommandResult> {
-  if (slug === undefined || slug === '') return fail('用法：/wiki history <slug>')
+async function renderHistory(service: TopicsService, slug: string | undefined): Promise<CommandResult> {
+  if (slug === undefined || slug === '') return fail('用法：/topics history <slug>')
   const { entries } = await service.history(slug, 30)
   if (entries.length === 0) return fail(`Topic “${slug}” 没有历史（不存在或 bundle 不是 git 仓库）`)
   const lines = [`${slug} 的变更史（${entries.length} 条）：`]
@@ -246,11 +246,11 @@ async function renderHistory(service: WikiService, slug: string | undefined): Pr
 }
 
 /**
- * /wiki graph — render the bundle's relationship graph into a self-contained
- * HTML page and open it in the default browser. Set DSH_LLMWIKI_NO_OPEN=1 to
+ * /topics graph — render the bundle's relationship graph into a self-contained
+ * HTML page and open it in the default browser. Set DSH_TOPICS_NO_OPEN=1 to
  * skip the browser launch (tests, headless use).
  */
-async function doGraph(service: WikiService): Promise<CommandResult> {
+async function doGraph(service: TopicsService): Promise<CommandResult> {
   const roster = await service.roster()
   if (roster.length === 0) return fail('Bundle 里还没有 Topic，无从画起（先记点什么）')
   const graph = buildGraph(roster)
@@ -268,7 +268,7 @@ async function doGraph(service: WikiService): Promise<CommandResult> {
 }
 
 function openInBrowser(file: string): boolean {
-  if (process.env.DSH_LLMWIKI_NO_OPEN === '1') return false
+  if (process.env.DSH_TOPICS_NO_OPEN === '1') return false
   try {
     const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
     const args = process.platform === 'win32' ? ['/c', 'start', '', file] : [file]
@@ -280,8 +280,8 @@ function openInBrowser(file: string): boolean {
   }
 }
 
-async function doSync(service: WikiService, direction: string | undefined): Promise<CommandResult> {
-  if (!service.githubMode) return fail('当前是 local-only 模式（/wiki set repo <owner/name> 启用 GitHub 同步）')
+async function doSync(service: TopicsService, direction: string | undefined): Promise<CommandResult> {
+  if (!service.githubMode) return fail('当前是 local-only 模式（/topics set repo <owner/name> 启用 GitHub 同步）')
   if (service.sync === undefined) return fail('同步层未就绪')
   if (direction === undefined || direction === 'push') {
     await service.sync.commitMeta()
@@ -293,10 +293,10 @@ async function doSync(service: WikiService, direction: string | undefined): Prom
     service.invalidate()
     return r.ok ? ok(`✅ ${r.message}`) : fail(r.message)
   }
-  return fail('用法：/wiki sync [pull|push]')
+  return fail('用法：/topics sync [pull|push]')
 }
 
-function renderConfig(cfg: LlmwikiConfigValue): string {
+function renderConfig(cfg: TopicsConfigValue): string {
   const lines = ['当前配置：']
   for (const key of CONFIG_KEYS) {
     lines.push(`  ${displayKey(key)} = ${String(cfg[key])}`)
@@ -305,14 +305,14 @@ function renderConfig(cfg: LlmwikiConfigValue): string {
 }
 
 /**
- * One ask-user panel for `/wiki set distill-provider|distill-model` without a
+ * One ask-user panel for `/topics set distill-provider|distill-model` without a
  * value. Picks are pre-validated like the onboard wizard (live-route check
  * for providers; resolveModelInfo for models — NO_ADAPTER blocks, off-catalog
  * warns but allows). Cancellation and blank answers write nothing;
  * ASK_CANCELLED / ASK_ABORTED surface as a clean no-write success.
  */
 async function setDistillInteractive(
-  service: WikiService,
+  service: TopicsService,
   key: 'distillProvider' | 'distillModel',
   ask: AskServiceShape,
   llm: LlmDirectoryShape,
@@ -321,7 +321,7 @@ async function setDistillInteractive(
 ): Promise<CommandResult> {
   const fail = (text: string): CommandResult => ({ kind: 'error', text })
   if (key === 'distillModel' && service.cfg.distillProvider === '') {
-    return fail('请先配置 distill-provider 再选模型：/wiki set distill-provider（有 UI 时会弹 provider 选择面板）')
+    return fail('请先配置 distill-provider 再选模型：/topics set distill-provider（有 UI 时会弹 provider 选择面板）')
   }
   const invocationLike = invocation as { agent?: unknown; signal?: AbortSignal }
   const panel = makePanel(ask, invocationLike.agent, invocationLike.signal)
@@ -330,17 +330,17 @@ async function setDistillInteractive(
     const picked = await askDistillSingle(llm, panel, askKey, service.cfg)
     if (picked === undefined) return ok('未选择，配置保持原样。')
     await mutate([{ op: 'set', path: [key], value: picked.value }])
-    return ok(`✅ llmwiki.${displayKey(key)} = ${picked.value}${picked.warning === undefined ? '' : `\n⚠️ ${picked.warning}`}`)
+    return ok(`✅ topics.${displayKey(key)} = ${picked.value}${picked.warning === undefined ? '' : `\n⚠️ ${picked.warning}`}`)
   } catch (error) {
     const code = (error as { code?: string }).code
     if (code === 'ASK_CANCELLED' || code === 'ASK_ABORTED') return ok('已取消，未写入任何改动。')
-    if (code === 'ASK_MISSING_AGENT') return fail('当前 surface 的 ask-user 需要会话上下文。请改用 /wiki set 带值输入。')
+    if (code === 'ASK_MISSING_AGENT') return fail('当前 surface 的 ask-user 需要会话上下文。请改用 /topics set 带值输入。')
     throw error
   }
 }
 
 async function doSet(
-  service: WikiService,
+  service: TopicsService,
   tokens: string[],
   mutate: (ops: readonly { op: 'set'; path: string[]; value: unknown }[]) => Promise<void>,
   resolveAsk: AskServiceResolver = () => undefined,
@@ -364,7 +364,7 @@ async function doSet(
       return setDistillInteractive(service, key, ask, pick.llm, mutate, invocation)
     }
     const reason = llmDirectoryNotice(pick) ?? '当前 surface 没有 ask-user 面板'
-    return fail(`${displayKey(key)} 需要一个值（如 /wiki set distill-model zai-coding-cn glm-4.7-air），未写入任何改动。选择面板不可用：${reason}`)
+    return fail(`${displayKey(key)} 需要一个值（如 /topics set distill-model zai-coding-cn glm-4.7-air），未写入任何改动。选择面板不可用：${reason}`)
   }
   // Mixed "provider model" / "provider/model" values for distill-model split
   // into BOTH keys — the historical root of `distillModel: "prov model"` dirt.
@@ -380,18 +380,18 @@ async function doSet(
     ])
     const overwrote = previousProvider !== '' && previousProvider !== parsed.provider
     return ok([
-      `✅ llmwiki.distill-provider = ${parsed.provider}`,
-      `✅ llmwiki.distill-model = ${parsed.model}`,
+      `✅ topics.distill-provider = ${parsed.provider}`,
+      `✅ topics.distill-model = ${parsed.model}`,
       '（混写值已拆分写入 distill-provider 与 distill-model 两个键）',
       ...(overwrote ? [`⚠️ 已覆盖原 distill-provider «${previousProvider}»`] : []),
     ].join('\n'))
   }
   if (key === 'distillProvider' && rawValue !== '' && /[\s/]/.test(rawValue)) {
-    return fail('distill-provider 只接受单段 provider id（不含空格或斜杠）。混合值请用 /wiki set distill-model "provider model" 一次写入两个键。')
+    return fail('distill-provider 只接受单段 provider id（不含空格或斜杠）。混合值请用 /topics set distill-model "provider model" 一次写入两个键。')
   }
   const parsed = parseConfigValue(key, rawValue)
   if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) return fail(parsed.error)
   await mutate([{ op: 'set', path: [key], value: parsed }])
   if (key === 'repo' || key === 'autoInject') service.invalidate()
-  return ok(`✅ llmwiki.${displayKey(key)} = ${String(parsed)}`)
+  return ok(`✅ topics.${displayKey(key)} = ${String(parsed)}`)
 }

@@ -48,7 +48,7 @@ agent-default-model:
 EOF
 
 echo '==> seeding the bundle with a marker topic'
-B="$DSH_HOME/llmwiki"
+B="$DSH_HOME/topics"
 mkdir -p "$B/topics" "$B/meta"
 git init -q -b main "$B"
 git -C "$B" -c user.name=e2e -c user.email=e2e@localhost add -A 2>/dev/null || true

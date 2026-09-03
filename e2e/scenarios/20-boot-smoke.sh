@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Scenario 20 — real-host mount & boot proof: the composed profile tree must
-# contain dsh-llmwiki-memory, and a real dsh boot must survive without loader
+# contain dsh-topics-memory, and a real dsh boot must survive without loader
 # errors.
 set -euo pipefail
 
 export DSH_HOME=/root/.dsh-e2e
 
 echo '==> dsh --profile e2e --dump-config'
-dsh --profile e2e --dump-config | grep -q 'dsh-llmwiki-memory' \
-  || { echo 'FAIL: composed tree does not contain dsh-llmwiki-memory'; exit 1; }
-echo '==> composed tree contains dsh-llmwiki-memory; booting real dsh for 25s…'
+dsh --profile e2e --dump-config | grep -q 'dsh-topics-memory' \
+  || { echo 'FAIL: composed tree does not contain dsh-topics-memory'; exit 1; }
+echo '==> composed tree contains dsh-topics-memory; booting real dsh for 25s…'
 
 set +e
 timeout --signal=KILL 25 dsh --profile e2e > /tmp/boot.log 2>&1

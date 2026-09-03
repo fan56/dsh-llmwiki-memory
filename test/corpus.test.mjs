@@ -10,7 +10,7 @@ import { existsSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BundleStore } from '../lib/store.js'
-import { WikiService } from '../lib/service.js'
+import { TopicsService } from '../lib/service.js'
 import { tokenize } from '../lib/retrieval.js'
 
 const sessionsRoot = join(homedir(), '.dsh', 'sessions')
@@ -63,7 +63,7 @@ test('corpus replay: real session inputs against seeded topics', async (t) => {
     t.skip('no local dsh sessions corpus (~/.dsh/sessions) — skipping on CI')
     return
   }
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-corpus-'))
+  const root = mkdtempSync(join(tmpdir(), 'topics-corpus-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const store = new BundleStore(root)
   await store.ensure()
@@ -97,7 +97,7 @@ test('corpus replay: real session inputs against seeded topics', async (t) => {
     autoObserve: true, observationMaxChars: 2000, distillEveryTurns: 20,
     distillOnSessionEnd: true, distillProvider: '', distillModel: '', pushDebounceSeconds: 45,
   }
-  const service = new WikiService(store, () => cfg)
+  const service = new TopicsService(store, () => cfg)
 
   let rounds = 0
   let hitRounds = 0

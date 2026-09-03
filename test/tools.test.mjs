@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BundleStore } from '../lib/store.js'
-import { WikiService } from '../lib/service.js'
+import { TopicsService } from '../lib/service.js'
 import { buildTopicTools } from '../lib/tools.js'
 
 function tmpService() {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-tools-'))
+  const root = mkdtempSync(join(tmpdir(), 'topics-tools-'))
   const store = new BundleStore(root)
   const cfg = {
     repo: '', autoInject: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
@@ -16,7 +16,7 @@ function tmpService() {
     autoObserve: true, observationMaxChars: 2000, distillEveryTurns: 20,
     distillOnSessionEnd: true, distillProvider: '', distillModel: '', pushDebounceSeconds: 45,
   }
-  const service = new WikiService(store, () => cfg)
+  const service = new TopicsService(store, () => cfg)
   return { root, store, service, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 

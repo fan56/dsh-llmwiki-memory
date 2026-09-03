@@ -51,7 +51,7 @@ export class Sync {
     return this.cfg().repo !== ''
   }
 
-  /** Session start (or `/wiki sync pull`): rebase onto remote, mark conflicts. */
+  /** Session start (or `/topics sync pull`): rebase onto remote, mark conflicts. */
   async pull(): Promise<{ ok: boolean; conflicted: string[]; message: string }> {
     if (!this.active) return { ok: true, conflicted: [], message: 'local-only 模式，无同步' }
     const token = await this.safeToken()
@@ -130,7 +130,7 @@ export class Sync {
   /** Commit the meta sidecars (injection log, observations) — flush cadence. */
   async commitMeta(): Promise<void> {
     if (!this.active) return
-    await gitmod.addAndCommit(this.store.root, ['meta'], 'wiki(meta): flush injection log / observations').catch(() => undefined)
+    await gitmod.addAndCommit(this.store.root, ['meta'], 'topics(meta): flush injection log / observations').catch(() => undefined)
   }
 
   dispose(): void {

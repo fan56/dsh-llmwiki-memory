@@ -86,7 +86,7 @@ export function runGit(args: readonly string[], opts: GitRunOptions): Promise<Gi
 }
 
 /** Commit identity so bundle history never depends on the machine's git config. */
-const IDENTITY = ['-c', 'user.name=dsh-llmwiki-memory', '-c', 'user.email=dsh-llmwiki-memory@localhost']
+const IDENTITY = ['-c', 'user.name=dsh-topics-memory', '-c', 'user.email=dsh-topics-memory@localhost']
 
 export async function isRepo(cwd: string): Promise<boolean> {
   const r = await runGit(['rev-parse', '--is-inside-work-tree'], { cwd, mayFail: true }).catch(() => undefined)

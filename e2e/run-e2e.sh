@@ -9,13 +9,13 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IMAGE="${IMAGE:-localhost/dsh-llmwiki-memory-e2e:latest}"
+IMAGE="${IMAGE:-localhost/dsh-topics-memory-e2e:latest}"
 
 printf '==> building image %s (context: %s)\n' "$IMAGE" "$REPO_ROOT"
 podman build -f "$REPO_ROOT/e2e/Containerfile" -t "$IMAGE" "$REPO_ROOT"
 
 printf '==> running scenario suite (all state stays inside the container)\n'
-podman run --rm --name dsh-llmwiki-memory-e2e \
+podman run --rm --name dsh-topics-memory-e2e \
   -v "$REPO_ROOT/e2e:/e2e:ro" \
   "$IMAGE" \
   bash /e2e/scenarios/run-all.sh

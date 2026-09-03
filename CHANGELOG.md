@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+- 插件更名：`dsh-llmwiki-memory` → `dsh-topics-memory`（npm 包 `@aiwayds/dsh-llmwiki-memory` → `@aiwayds/dsh-topics-memory`；插件 id、git identity、蒸馏 purpose 标记、关系图标题等同步）。命令族 `/wiki` → `/topics`，settings namespace `llmwiki` → `topics`，数据目录 `~/.dsh/llmwiki` → `~/.dsh/topics`，覆盖环境变量 `DSH_LLMWIKI_HOME` → `DSH_TOPICS_HOME`。OKF 格式的 `[[wikilink]]` 语法与外部项目（zosmaai/pi-llm-wiki、chancelu/dsh-llmwiki 等）提及不受影响。
+- 默认数据仓名建议值 `dsh-wiki-memory` → `dsh-topics-data`（延续「数据仓名 ≠ 插件源码仓名」原则，ADR 0002/0009/0013）。
+- 一次性自动迁移（ADR 0013，两条路径，均 fail-open）：
+  - 数据目录：未设 `$DSH_TOPICS_HOME` 时，若新目录不存在而旧 `~/.dsh/llmwiki` 存在，启动即 rename 旧 → 新；rename 失败回落旧路径继续服务。显式设置 `$DSH_TOPICS_HOME` 完全绕过迁移。
+  - settings namespace：启动时把旧 `llmwiki` namespace 里用户调过的键（值 ≠ schema 默认值）一次性写入新 `topics` namespace；新 namespace 已有用户配置（含此前迁移结果）即天然幂等不再触发；legacy 读取（注册旧 namespace）与写入的任何异常都只跳过迁移、不影响插件启动。
+
 ## 0.5.0 (2026-09-02)
 
 - 吞吐：`distillMaxModelCalls` 默认 3 → 8。预算 3 次时每个 run 只消化 9–14 条观察，清 300 条积压要 20+ 个 run；批循环之下 8 次一轮可消化约 30–40 条（清积压场景的默认值，显式配置不受影响）。

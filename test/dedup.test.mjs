@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../lib/index.js'
 import { BundleStore } from '../lib/store.js'
-import { WikiService } from '../lib/service.js'
+import { TopicsService } from '../lib/service.js'
 
 const DEFAULT_CFG = {
   repo: '', autoInject: true, injectDedup: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
@@ -37,12 +37,12 @@ const userMsg = (text) => ({ source: { kind: 'user' }, content: [{ type: 'text',
  * live (mutating the object mid-test changes cfgNow()), session/event
  * handlers are captured for direct dispatch, systemPrompt.context sinks are
  * recorded (index 0 = the topic-memory provider). The bundle root is
- * redirected to a tmp dir via $DSH_LLMWIKI_HOME before apply() runs.
+ * redirected to a tmp dir via $DSH_TOPICS_HOME before apply() runs.
  */
 function bootPlugin(overrides = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-dedup-'))
-  const prevHome = process.env.DSH_LLMWIKI_HOME
-  process.env.DSH_LLMWIKI_HOME = root
+  const root = mkdtempSync(join(tmpdir(), 'topics-dedup-'))
+  const prevHome = process.env.DSH_TOPICS_HOME
+  process.env.DSH_TOPICS_HOME = root
   const handlers = []
   const disposedHandlers = {}
   const contexts = []
@@ -80,8 +80,8 @@ function bootPlugin(overrides = {}) {
   }
   const injectedText = (sessionId) => contexts[0].text({ agent: { id: sessionId } })
   const cleanup = () => {
-    if (prevHome === undefined) delete process.env.DSH_LLMWIKI_HOME
-    else process.env.DSH_LLMWIKI_HOME = prevHome
+    if (prevHome === undefined) delete process.env.DSH_TOPICS_HOME
+    else process.env.DSH_TOPICS_HOME = prevHome
     rmSync(root, { recursive: true, force: true })
   }
   return { root, dispatch, dispose, claim, injectedText, cleanup }
@@ -91,7 +91,7 @@ function bootPlugin(overrides = {}) {
 async function seedTopics(root, topics) {
   const store = new BundleStore(root)
   await store.ensure()
-  const service = new WikiService(store, () => ({ ...DEFAULT_CFG }))
+  const service = new TopicsService(store, () => ({ ...DEFAULT_CFG }))
   for (const topic of topics) await service.saveTopic(topic)
   return store
 }
@@ -108,11 +108,11 @@ async function readRecords(store, expected) {
 }
 
 test('retrieveSync: exclude filters hits before assembly and reports deduped', async (t) => {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-dedup-svc-'))
+  const root = mkdtempSync(join(tmpdir(), 'topics-dedup-svc-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const store = new BundleStore(root)
   await store.ensure()
-  const service = new WikiService(store, () => ({ ...DEFAULT_CFG }))
+  const service = new TopicsService(store, () => ({ ...DEFAULT_CFG }))
   await service.saveTopic(TOPIC_A)
   const r1 = service.retrieveSync(QUERY_A, 's1')
   assert.deepEqual(r1.included, [SLUG_A])

@@ -2,7 +2,7 @@
 # Scenario 40 — distill lane end-to-end in a real dsh process (keyless):
 #   - fixture carries TWO model scripts: call 1 = the main agent's answer,
 #     call 2 = a distill-lane ops JSON (create one Topic)
-#   - llmwiki.distillEveryTurns=1 so the turn/end trigger fires inside the
+#   - topics.distillEveryTurns=1 so the turn/end trigger fires inside the
 #     one-shot session; replay answers in-process, so the lane wins the
 #     exit race deterministically
 #   - assert: the distilled topic file lands in the bundle with a commit
@@ -10,7 +10,7 @@ set -euo pipefail
 
 export DSH_HOME=/root/.dsh-e2e
 P="$DSH_HOME/profiles/e2e"
-B="$DSH_HOME/llmwiki"
+B="$DSH_HOME/topics"
 
 : "${DSH_VERSION:=$(npm view @deepseek-ai/dsh version)}"
 
@@ -19,7 +19,7 @@ cat > "$DSH_HOME/settings.yaml" <<'EOF'
 agent-default-model:
   provider: replay
   model: replay-1
-llmwiki:
+topics:
   distillProvider: replay
   distillModel: replay-1
   distillEveryTurns: 1

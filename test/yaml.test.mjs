@@ -92,7 +92,7 @@ test('serialize + parse round-trip (frontmatter-shaped)', () => {
     open_questions: ['跨机漂移怎么解？', '错过窗口补跑吗'],
     impact: ['topics/dsh-plugin-api.md', '运维流程'],
     status: 'stable',
-    generated: { by: 'agent:dsh-llmwiki-memory@Mac', at: '2026-08-31T12:00:00Z' },
+    generated: { by: 'agent:dsh-topics-memory@Mac', at: '2026-08-31T12:00:00Z' },
     sources: [{ id: 's1', resource: 'https://github.com/fan56/dsh-cron', title: 'repo' }],
     extra_key: { nested: 'kept' },
   }

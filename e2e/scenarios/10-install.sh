@@ -11,7 +11,7 @@ TARBALL="$(ls /dist/*.tgz)"
 echo "==> dsh plugin --profile e2e add $TARBALL"
 dsh plugin --profile e2e add "$TARBALL"
 
-grep -q '@aiwayds/dsh-llmwiki-memory' "$DSH_HOME/profiles/e2e/package.json" \
-  || { echo 'FAIL: profile package.json has no dsh-llmwiki-memory dependency'; exit 1; }
+grep -q '@aiwayds/dsh-topics-memory' "$DSH_HOME/profiles/e2e/package.json" \
+  || { echo 'FAIL: profile package.json has no dsh-topics-memory dependency'; exit 1; }
 
 echo "PASS 10-install: tarball installed into the scratch profile"

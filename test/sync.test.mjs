@@ -9,7 +9,7 @@ import { BundleStore } from '../lib/store.js'
 import { Sync } from '../lib/sync.js'
 
 function tmp() {
-  const dir = mkdtempSync(join(tmpdir(), 'llmwiki-sync-'))
+  const dir = mkdtempSync(join(tmpdir(), 'topics-sync-'))
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
@@ -41,7 +41,7 @@ test('sync: inactive in local-only mode', async () => {
 
 test('sync: pull + debounced push against a bare remote', async () => {
   const work = tmp()
-  const bare = mkdtempSync(join(tmpdir(), 'llmwiki-bare-'))
+  const bare = mkdtempSync(join(tmpdir(), 'topics-bare-'))
   try {
     const store = new BundleStore(work.dir)
     await seed(store)
@@ -53,7 +53,7 @@ test('sync: pull + debounced push against a bare remote', async () => {
     const r = await sync.flush()
     assert.equal(r.ok, true, r.message)
     // A second machine clones and pulls cleanly.
-    const other = mkdtempSync(join(tmpdir(), 'llmwiki-other-'))
+    const other = mkdtempSync(join(tmpdir(), 'topics-other-'))
     try {
       execFileSync('git', ['clone', join(bare, 'origin.git'), other], { stdio: 'pipe' })
       writeFileSync(join(other, 'topics/beta.md'), '---\ntype: Topic\ntitle: B\n---\n', 'utf8')
@@ -85,14 +85,14 @@ test('sync: pull + debounced push against a bare remote', async () => {
 
 test('sync: conflicting edit marks conflicted topics on pull', async () => {
   const work = tmp()
-  const bare = mkdtempSync(join(tmpdir(), 'llmwiki-bare-'))
+  const bare = mkdtempSync(join(tmpdir(), 'topics-bare-'))
   try {
     const store = new BundleStore(work.dir)
     await seed(store)
     execFileSync('git', ['init', '--bare', '-b', 'main', join(bare, 'origin.git')], { stdio: 'pipe' })
     const sync = new Sync(store, () => ({ repo: 'o/n', pushDebounceSeconds: 30 }), async () => undefined, (repo) => join(bare, 'origin.git'))
     assert.equal((await sync.flush()).ok, true)
-    const other = mkdtempSync(join(tmpdir(), 'llmwiki-other-'))
+    const other = mkdtempSync(join(tmpdir(), 'topics-other-'))
     try {
       execFileSync('git', ['clone', join(bare, 'origin.git'), other], { stdio: 'pipe' })
       writeFileSync(join(other, 'topics/alpha.md'), 'remote side\n', 'utf8')

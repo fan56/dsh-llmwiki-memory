@@ -4,12 +4,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BundleStore } from '../lib/store.js'
-import { WikiService } from '../lib/service.js'
-import { buildWikiCommand, HELP } from '../lib/commands.js'
+import { TopicsService } from '../lib/service.js'
+import { buildTopicsCommand, HELP } from '../lib/commands.js'
 import { applyAnswer, confirmOps, createOnboardHandler, freshState, renderStep } from '../lib/onboard.js'
 
 function makeService(cfgOverrides = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'llmwiki-onboard-'))
+  const root = mkdtempSync(join(tmpdir(), 'topics-onboard-'))
   const store = new BundleStore(root)
   let cfg = {
     repo: '', autoInject: true, topK: 4, perTopicBudget: 300, totalBudget: 1500,
@@ -18,7 +18,7 @@ function makeService(cfgOverrides = {}) {
     distillOnSessionEnd: true, distillProvider: '', distillModel: '', pushDebounceSeconds: 45,
     ...cfgOverrides,
   }
-  const service = new WikiService(store, () => cfg)
+  const service = new TopicsService(store, () => cfg)
   const mutations = []
   const mutate = async (ops) => {
     mutations.push(ops.map((o) => `${o.path[0]}=${o.value}`))
@@ -60,7 +60,7 @@ async function run(cmd, answers) {
 test('onboard: bare invocation renders mode step with a/b/c and quit hint', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /配置向导（1\/4）/)
@@ -68,7 +68,7 @@ test('onboard: bare invocation renders mode step with a/b/c and quit hint', asyn
     assert.match(r.text, /b\. GitHub 同步/)
     assert.match(r.text, /c\. 跳过/)
     assert.match(r.text, /quit/)
-    assert.match(HELP, /\/wiki onboard/)
+    assert.match(HELP, /\/topics onboard/)
   } finally {
     cleanup()
   }
@@ -77,7 +77,7 @@ test('onboard: bare invocation renders mode step with a/b/c and quit hint', asyn
 test('onboard: local-only path skips repo step and runs 4 steps', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const [mode, distill] = await run(cmd, ['a', 'a'])
     assert.match(mode.text, /（2\/4）/)
     assert.match(mode.text, /蒸馏/)
@@ -92,7 +92,7 @@ test('onboard: local-only path skips repo step and runs 4 steps', async () => {
 test('onboard: github path adds repo step; bad repo errors and stays', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const repoStep = await cmd.handler(inv('onboard b'))
     assert.match(repoStep.text, /（2\/5）/)
     assert.match(repoStep.text, /GitHub 仓库/)
@@ -117,7 +117,7 @@ test('onboard: repo auto-detect uses injected detector; failure keeps the step',
     await detectOk(['c'], inv(''))
     await detectOk(['c'], inv(''))
     const confirm = await detectOk(['c'], inv(''))
-    assert.match(confirm.text, /repo = someuser\/dsh-wiki-memory/)
+    assert.match(confirm.text, /repo = someuser\/dsh-topics-data/)
     const detectFail = createOnboardHandler(service, mutate, async () => undefined)
     await detectFail(['b'], inv(''))
     const failed = await detectFail(['a'], inv(''))
@@ -131,7 +131,7 @@ test('onboard: repo auto-detect uses injected detector; failure keeps the step',
 test('onboard: distill accepts space form; rejects garbage; summary reaches confirm', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     await cmd.handler(inv('onboard a'))
     const bad = await cmd.handler(inv('onboard only-provider'))
     assert.equal(bad.kind, 'error')
@@ -150,7 +150,7 @@ test('onboard: distill accepts space form; rejects garbage; summary reaches conf
 test('onboard: inject tiers land in pending; confirm lists and writes exactly those keys', async () => {
   const { service, mutations, mutate, cleanup, getCfg } = makeService({ repo: '' })
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     await run(cmd, ['a', 'a', 'a'])
     const confirm = await cmd.handler(inv('onboard a'))
     assert.match(confirm.text, /确认/)
@@ -159,7 +159,7 @@ test('onboard: inject tiers land in pending; confirm lists and writes exactly th
     assert.match(confirm.text, /auto-observe = true/)
     assert.doesNotMatch(confirm.text, /repo =/)
     const done = await cmd.handler(inv('onboard a'))
-    assert.match(done.text, /已写入 llmwiki 配置（3 项）/)
+    assert.match(done.text, /已写入 topics 配置（3 项）/)
     assert.match(done.text, /下次会话启动后生效/)
     assert.equal(mutations.length, 1)
     assert.deepEqual(mutations[0], ['topK=2', 'totalBudget=800', 'autoObserve=true'])
@@ -175,7 +175,7 @@ test('onboard: inject tiers land in pending; confirm lists and writes exactly th
 test('onboard: confirm b aborts without writing', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     await run(cmd, ['a', 'a', 'b', 'b'])
     const aborted = await cmd.handler(inv('onboard b'))
     assert.match(aborted.text, /已放弃/)
@@ -190,7 +190,7 @@ test('onboard: confirm b aborts without writing', async () => {
 test('onboard: quit midway writes nothing and resets', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     await cmd.handler(inv('onboard a'))
     const quit = await cmd.handler(inv('onboard quit'))
     assert.match(quit.text, /未写入任何改动/)
@@ -205,7 +205,7 @@ test('onboard: quit midway writes nothing and resets', async () => {
 test('onboard: skipping every step finishes cleanly with zero writes', async () => {
   const { service, mutations, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const results = await run(cmd, ['c', 'c', 'c', 'c'])
     const confirm = results[3]
     assert.match(confirm.text, /没有选择任何改动/)
@@ -220,7 +220,7 @@ test('onboard: skipping every step finishes cleanly with zero writes', async () 
 test('onboard: repo skip after github mode falls back to confirm without repo', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     await run(cmd, ['b', 'c', 'c', 'c'])
     const confirm = await cmd.handler(inv('onboard c'))
     assert.match(confirm.text, /没有选择任何改动/)
@@ -232,7 +232,7 @@ test('onboard: repo skip after github mode falls back to confirm without repo', 
 test('onboard: bad letter on a choice step errors and re-renders the same step', async () => {
   const { service, mutate, cleanup } = makeService()
   try {
-    const cmd = buildWikiCommand(service, mutate)
+    const cmd = buildTopicsCommand(service, mutate)
     const bad = await cmd.handler(inv('onboard zzz'))
     assert.equal(bad.kind, 'error')
     assert.match(bad.text, /（1\/4）/)
@@ -308,10 +308,10 @@ test('onboard interactive: local-only happy path asks mode → distill two-step 
       [{ id: 'inject', selected: ['标准（topK 4 · 1.5k tok）'] }, { id: 'observe', selected: [] }],
       [{ id: 'confirm', selected: ['写入'] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'success')
-    assert.match(r.text, /已写入 llmwiki 配置（4 项）/)
+    assert.match(r.text, /已写入 topics 配置（4 项）/)
     assert.equal(ask.calls.length, 5)
     // Provider panel: live ids + skip, one question per ask (provider → model dependency).
     assert.equal(ask.calls[1].questions.length, 1)
@@ -354,7 +354,7 @@ test('onboard interactive: model catalog truncates to 8 with 共 N hint; custom 
       [{ id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
       [{ id: 'confirm', selected: ['写入'] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'success')
     const modelQ = ask.calls[2].questions[0]
@@ -384,7 +384,7 @@ test('onboard interactive: off-catalog model (non-NO_ADAPTER failure) warns in c
       [{ id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
       [{ id: 'confirm', selected: ['写入'] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'success')
     assert.match(ask.calls[4].questions[0].detail, /⚠️ m1 未通过 prov 的模型目录校验（模型目录外，可能仍可用）/)
@@ -413,7 +413,7 @@ test('onboard interactive: NO_ADAPTER blocks and re-asks the provider panel with
       [{ id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
       [{ id: 'confirm', selected: ['写入'] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'success')
     assert.equal(ask.calls.length, 7)
@@ -437,7 +437,7 @@ test('onboard interactive: NO_ADAPTER every attempt fails the wizard with zero w
     }
     const answer = [{ id: 'distill-provider', selected: ['prov'] }, { id: 'distill-model', selected: ['m1'] }]
     const ask = fakeAsk([[{ id: 'mode', selected: ['local-only'] }], answer, answer, answer, answer, answer, answer])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'error')
     assert.match(r.text, /多次选择仍没有可用的模型路由/)
@@ -458,7 +458,7 @@ test('onboard interactive: skip on the provider panel skips model panel and writ
       [{ id: 'inject', selected: [] }, { id: 'observe', selected: ['关闭'] }],
       [{ id: 'confirm', selected: ['写入'] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'success')
     assert.equal(ask.calls.length, 4, 'no model panel after skip')
@@ -483,11 +483,11 @@ test('onboard interactive: github mode adds repo panel, custom answers win, agen
     const agent = { id: 'sess-1', session: { id: 'sess-1' } }
     const r = await handler([], invAgent('onboard', agent))
     assert.equal(r.kind, 'success')
-    assert.match(r.text, /已写入 llmwiki 配置（4 项）/)
+    assert.match(r.text, /已写入 topics 配置（4 项）/)
     // The repo suggestion was computed from the injected login detector.
     const batch = ask.calls[3].questions
     const repoQ = batch.find((q) => q.id === 'repo')
-    assert.equal(repoQ.options[0].label, 'someuser/dsh-wiki-memory')
+    assert.equal(repoQ.options[0].label, 'someuser/dsh-topics-data')
     // The invocation's agent rides on every ask so session-owned surfaces can route it.
     assert.equal(ask.calls[0].agent, agent)
     assert.deepEqual(mutations[0], ['repo=me/mine', 'autoObserve=false', 'distillProvider=prov', 'distillModel=m1'])
@@ -502,7 +502,7 @@ test('onboard interactive: closed panel cancels with zero writes', async () => {
   try {
     const llm = fakeLlm()
     const ask = fakeAsk([[{ id: 'mode', selected: ['local-only'] }]])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.equal(r.kind, 'success')
     assert.match(r.text, /已取消配置向导，未写入任何改动/)
@@ -517,7 +517,7 @@ test('onboard interactive: skipping the mode question ends the wizard', async ()
   try {
     const llm = fakeLlm()
     const ask = fakeAsk([[{ id: 'mode', selected: [] }]])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.match(r.text, /未选择存储模式/)
     assert.equal(ask.calls.length, 1)
@@ -537,7 +537,7 @@ test('onboard interactive: confirm-放弃 writes nothing', async () => {
       [{ id: 'inject', selected: ['保守（topK 2 · 800 tok）'] }],
       [{ id: 'confirm', selected: ['放弃'] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.match(r.text, /已放弃/)
     assert.equal(mutations.length, 0)
@@ -575,7 +575,7 @@ test('onboard interactive: every-batch-answer-skipped skips the confirm panel en
       [{ id: 'distill-provider', selected: [SKIP] }],
       [{ id: 'inject', selected: [] }, { id: 'observe', selected: [] }],
     ])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.match(r.text, /没有选择任何改动/)
     assert.equal(ask.calls.length, 3, 'no confirm panel when nothing is pending')
@@ -589,7 +589,7 @@ test('onboard: without an ask provider the bare command falls back to the typed 
   const { service, mutate, cleanup } = makeService()
   try {
     const llm = fakeLlm()
-    const cmd = buildWikiCommand(service, mutate, () => undefined, () => [llm])
+    const cmd = buildTopicsCommand(service, mutate, () => undefined, () => [llm])
     const r = await cmd.handler(inv('onboard'))
     assert.match(r.text, /配置向导（1\/4）/)
   } finally {
@@ -601,7 +601,7 @@ test('onboard: without the llm directory the bare command falls back to the type
   const { service, mutate, cleanup } = makeService()
   try {
     const ask = fakeAsk([])
-    const cmd = buildWikiCommand(service, mutate, () => ask, () => [])
+    const cmd = buildTopicsCommand(service, mutate, () => ask, () => [])
     const r = await cmd.handler(inv('onboard'))
     assert.match(r.text, /配置向导（1\/4）/)
     assert.equal(ask.calls.length, 0, 'no panels when the llm directory is missing')

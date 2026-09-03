@@ -1,12 +1,12 @@
 /**
- * `/wiki onboard` — an a/b/c configuration wizard that walks a new user
+ * `/topics onboard` — an a/b/c configuration wizard that walks a new user
  * through the five decisions that matter (storage mode, GitHub repo, distill
  * model, injection budget, auto-observe) one command at a time.
  *
  * Design (ADR 0009):
  *  - one invocation = one step: the wizard renders the current question with
  *    lettered options; the answer arrives as the next invocation's argument
- *    (`/wiki onboard b`). Works unchanged on every surface (tui, web, feishu,
+ *    (`/topics onboard b`). Works unchanged on every surface (tui, web, feishu,
  *    headless one-shots) because it never needs intra-turn interactivity.
  *  - answers accumulate in a pending batch; only the final confirm step
  *    writes settings — quitting midway leaves the config untouched.
@@ -18,11 +18,11 @@
 
 import { spawn } from 'node:child_process'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
-import type { WikiService } from './service.ts'
+import type { TopicsService } from './service.ts'
 import { pickLlmCandidate } from './distill.ts'
-import { CONFIG_KEYS, parseConfigValue, type LlmwikiConfigValue } from './config.ts'
+import { CONFIG_KEYS, parseConfigValue, type TopicsConfigValue } from './config.ts'
 
-/** CamelCase → dash-display, shared with /wiki config rendering. */
+/** CamelCase → dash-display, shared with /topics config rendering. */
 export function displayKey(key: string): string {
   return key.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()
 }
@@ -32,7 +32,7 @@ export type StepId = 'mode' | 'repo' | 'distill' | 'inject' | 'observe' | 'confi
 export interface OnboardState {
   step: StepId
   /** Answers so far; only written to settings at the confirm step. */
-  pending: Partial<LlmwikiConfigValue>
+  pending: Partial<TopicsConfigValue>
   /** Whether the user picked GitHub mode (adds the repo step). */
   pathHasRepo: boolean
 }
@@ -41,14 +41,14 @@ export type MutateFn = (ops: readonly { op: 'set'; path: string[]; value: unknow
 
 export type GithubLoginDetector = () => Promise<string | undefined>
 
-const FOOTER = '→ 回复 /wiki onboard a|b|c（自定义项把值直接打在后面）；quit 退出不写入'
+const FOOTER = '→ 回复 /topics onboard a|b|c（自定义项把值直接打在后面）；quit 退出不写入'
 
 /**
- * Suggested remote repo name. Deliberately NOT `dsh-llmwiki-memory`: that is
+ * Suggested remote repo name. Deliberately NOT `dsh-topics-memory`: that is
  * the plugin's own source repository, and the default data repo must never
  * collide with it (ADR 0002/0009).
  */
-export const DEFAULT_WIKI_REPO = 'dsh-wiki-memory'
+export const DEFAULT_TOPICS_REPO = 'dsh-topics-data'
 
 export function freshState(): OnboardState {
   return { step: 'mode', pending: {}, pathHasRepo: false }
@@ -60,16 +60,16 @@ function sequence(state: OnboardState): StepId[] {
 }
 
 function header(state: OnboardState, title: string): string {
-  if (state.step === 'confirm') return `🧭 llmwiki 配置向导（确认）—— ${title}`
+  if (state.step === 'confirm') return `🧭 topics 配置向导（确认）—— ${title}`
   const seq = sequence(state)
   const index = seq.indexOf(state.step)
   const total = seq.length
   const at = index === -1 ? total : index + 1
-  return `🧭 llmwiki 配置向导（${at}/${total}）—— ${title}`
+  return `🧭 topics 配置向导（${at}/${total}）—— ${title}`
 }
 
 /** Render the current step against live config overlaid with pending answers. */
-export function renderStep(state: OnboardState, cfg: LlmwikiConfigValue): string {
+export function renderStep(state: OnboardState, cfg: TopicsConfigValue): string {
   const cur = { ...cfg, ...state.pending }
   switch (state.step) {
     case 'mode':
@@ -86,8 +86,8 @@ export function renderStep(state: OnboardState, cfg: LlmwikiConfigValue): string
       return [
         header(state, 'GitHub 仓库'),
         `当前：${cur.repo === '' ? '未设置' : cur.repo}`,
-        '  a. 自动探测 gh 登录名，仓库用 <登录名>/' + DEFAULT_WIKI_REPO,
-        '  b. 自定义：把 owner/name 直接打在命令里，如 /wiki onboard myname/my-wiki',
+        '  a. 自动探测 gh 登录名，仓库用 <登录名>/' + DEFAULT_TOPICS_REPO,
+        '  b. 自定义：把 owner/name 直接打在命令里，如 /topics onboard myname/my-wiki',
         '  c. 跳过（留在 local-only）',
         '',
         FOOTER,
@@ -96,8 +96,8 @@ export function renderStep(state: OnboardState, cfg: LlmwikiConfigValue): string
       return [
         header(state, '后台蒸馏模型'),
         `当前：${cur.distillProvider !== '' && cur.distillModel !== '' ? `${cur.distillProvider} / ${cur.distillModel}` : '未配置（观察只积累，不自动蒸馏成 Topic）'}`,
-        '  a. 暂不开 —— 先用一阵，随时 /wiki set distill-provider 再开（推荐）',
-        '  b. 配置：把 provider model 打在命令里，如 /wiki onboard zai-coding-cn glm-4.7-air（也支持 provider/model）',
+        '  a. 暂不开 —— 先用一阵，随时 /topics set distill-provider 再开（推荐）',
+        '  b. 配置：把 provider model 打在命令里，如 /topics onboard zai-coding-cn glm-4.7-air（也支持 provider/model）',
         '  c. 跳过',
         '',
         FOOTER,
@@ -126,10 +126,10 @@ export function renderStep(state: OnboardState, cfg: LlmwikiConfigValue): string
     case 'confirm': {
       const keys = CONFIG_KEYS.filter((k) => k in state.pending)
       if (keys.length === 0) {
-        return '向导结束——本次没有选择任何改动，配置保持原样。\n重新 /wiki onboard 可再来；/wiki set 可微调单项。'
+        return '向导结束——本次没有选择任何改动，配置保持原样。\n重新 /topics onboard 可再来；/topics set 可微调单项。'
       }
       return [
-        header(state, '待写入 settings（llmwiki namespace）'),
+        header(state, '待写入 settings（topics namespace）'),
         ...keys.map((k) => `  ${displayKey(k)} = ${String(state.pending[k])}`),
         '（未列出的项保持现状）',
         '',
@@ -138,7 +138,7 @@ export function renderStep(state: OnboardState, cfg: LlmwikiConfigValue): string
       ].join('\n')
     }
     case 'done':
-      return '向导已结束。重新 /wiki onboard 可再来；/wiki config 查看当前配置。'
+      return '向导已结束。重新 /topics onboard 可再来；/topics config 查看当前配置。'
   }
 }
 
@@ -146,7 +146,7 @@ export function renderStep(state: OnboardState, cfg: LlmwikiConfigValue): string
  * Pure step machine: consume one answer, return the next state. The caller
  * intercepts control answers (quit) and confirm-write before calling this.
  */
-export function applyAnswer(state: OnboardState, answer: string, cfg: LlmwikiConfigValue): { state: OnboardState; error?: string } {
+export function applyAnswer(state: OnboardState, answer: string, cfg: TopicsConfigValue): { state: OnboardState; error?: string } {
   const letter = /^[a-c]$/i.exec(answer)?.[0]?.toLowerCase()
   const next = (patch: Partial<OnboardState>): OnboardState => ({ ...state, ...patch })
   switch (state.step) {
@@ -163,7 +163,7 @@ export function applyAnswer(state: OnboardState, answer: string, cfg: LlmwikiCon
     }
     case 'distill': {
       if (letter === 'a' || letter === 'c') return { state: next({ step: 'inject' }) }
-      // Shared with the /wiki set mixed-value split: space form wins so model
+      // Shared with the /topics set mixed-value split: space form wins so model
       // ids may themselves contain slashes (`openrouter meta-llama/llama-3`).
       const parsed = parseDistillInput(answer)
       if ('error' in parsed) return { state, error: parsed.error }
@@ -189,7 +189,7 @@ export function applyAnswer(state: OnboardState, answer: string, cfg: LlmwikiCon
 }
 
 /** Settings ops for the pending batch, in stable CONFIG_KEYS order. */
-export function confirmOps(pending: Partial<LlmwikiConfigValue>): { op: 'set'; path: string[]; value: unknown }[] {
+export function confirmOps(pending: Partial<TopicsConfigValue>): { op: 'set'; path: string[]; value: unknown }[] {
   return CONFIG_KEYS.filter((k) => k in pending).map((k) => ({ op: 'set' as const, path: [k], value: pending[k] }))
 }
 
@@ -401,7 +401,7 @@ function distillProviderQuestion(llm: LlmDirectoryShape, current: string, notice
     ].join('\n'),
     options: [
       ...listed.map((p) => ({ label: p.id, description: p.name })),
-      ...(withSkip ? [{ label: SKIP_LABEL, description: '先不启用蒸馏，随时 /wiki set distill-provider 再开' }] : []),
+      ...(withSkip ? [{ label: SKIP_LABEL, description: '先不启用蒸馏，随时 /topics set distill-provider 再开' }] : []),
     ],
   }
 }
@@ -423,8 +423,8 @@ async function distillModelQuestion(llm: LlmDirectoryShape, provider: string, cu
   }
 }
 
-const WIZARD_HEADER = 'llmwiki 配置向导（2/4）'
-const SET_HEADER = 'llmwiki distill 配置'
+const WIZARD_HEADER = 'topics 配置向导（2/4）'
+const SET_HEADER = 'topics distill 配置'
 
 /**
  * Two dependent panels — provider first, then that provider's models — so the
@@ -462,11 +462,11 @@ export async function askDistillRoute(
       return { provider, model, unknownModel: true }
     }
   }
-  throw new Error(`多次选择仍没有可用的模型路由（${notice ?? 'NO_ADAPTER'}），未写入任何改动；请确认 provider 已启用后重试 /wiki onboard`)
+  throw new Error(`多次选择仍没有可用的模型路由（${notice ?? 'NO_ADAPTER'}），未写入任何改动；请确认 provider 已启用后重试 /topics onboard`)
 }
 
 /**
- * Single-panel variant behind `/wiki set distill-provider|distill-model`:
+ * Single-panel variant behind `/topics set distill-provider|distill-model`:
  * one question, current value shown, blank answer = keep. Validation mirrors
  * the wizard (`askDistillRoute`): a provider pick must sit in the live route
  * table (the NO_ADAPTER equivalent — blocked, bounded re-ask); a model pick
@@ -522,7 +522,7 @@ export async function askDistillSingle(
  * on it and falls back to the typed wizard).
  */
 export async function runInteractiveOnboard(
-  service: WikiService,
+  service: TopicsService,
   mutate: MutateFn,
   ask: AskServiceShape,
   detectLogin: GithubLoginDetector,
@@ -538,7 +538,7 @@ export async function runInteractiveOnboard(
     // Stage 1 — storage mode (its own panel: the batch depends on it).
     const modeAnswers = await panel([{
       id: 'mode',
-      header: 'llmwiki 配置向导（1/4）',
+      header: 'topics 配置向导（1/4）',
       question: 'Topic 记忆存在哪里？',
       detail: `当前：${cfg.repo === '' ? 'local-only' : `GitHub 同步（${cfg.repo}）`}`,
       options: [
@@ -559,19 +559,19 @@ export async function runInteractiveOnboard(
     let suggestedRepo: string | undefined
     if (githubMode) {
       const login = await detectLogin()
-      if (login !== undefined) suggestedRepo = `${login}/${DEFAULT_WIKI_REPO}`
+      if (login !== undefined) suggestedRepo = `${login}/${DEFAULT_TOPICS_REPO}`
       questions.push({
         id: 'repo',
-        header: 'llmwiki 配置向导（3/4）',
+        header: 'topics 配置向导（3/4）',
         question: 'GitHub 仓库（owner/name）？',
-        detail: `留空跳过 = 留在 local-only。默认建议 ${suggestedRepo ?? `${DEFAULT_WIKI_REPO}（gh 登录名探测失败，请选 Other 输入完整 owner/name）`}`,
+        detail: `留空跳过 = 留在 local-only。默认建议 ${suggestedRepo ?? `${DEFAULT_TOPICS_REPO}（gh 登录名探测失败，请选 Other 输入完整 owner/name）`}`,
         ...(suggestedRepo === undefined ? {} : { options: [{ label: suggestedRepo, description: '自动探测的 gh 登录名 + 默认仓库名' }] }),
       })
     }
     questions.push(
       {
         id: 'inject',
-        header: 'llmwiki 配置向导（3/4）',
+        header: 'topics 配置向导（3/4）',
         question: '注入档位？',
         detail: `当前：topK ${cfg.topK} / 总预算 ${cfg.totalBudget} tok / 阈值 ${cfg.matchThreshold}；会话级去重${cfg.injectDedup ? '开（同会话已注入不重注）' : '关'}`,
         options: [
@@ -582,7 +582,7 @@ export async function runInteractiveOnboard(
       },
       {
         id: 'observe',
-        header: 'llmwiki 配置向导（3/4）',
+        header: 'topics 配置向导（3/4）',
         question: '自动观察？',
         detail: `当前：${cfg.autoObserve ? `开（每轮自动抓原子观察，每侧 ≤${cfg.observationMaxChars} 字）` : '关（只手动 topic_save / topic_observe）'}`,
         options: [
@@ -594,14 +594,14 @@ export async function runInteractiveOnboard(
     const batchAnswers = await panel(questions)
 
     // Collect into the same pending batch the typed wizard confirms with.
-    const pending: Partial<LlmwikiConfigValue> = {}
+    const pending: Partial<TopicsConfigValue> = {}
     if (githubMode) {
       const a = answerFor(batchAnswers, 'repo')
       if (isAnswered(a)) {
         const raw = (a.custom !== undefined && a.custom.trim() !== '' ? a.custom : a.selected[0] ?? '').trim()
         const parsed = parseConfigValue('repo', raw)
         if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) {
-          return fail(`${parsed.error}\n未写入任何改动；稍后可用 /wiki set repo <owner/name> 单独设置。`)
+          return fail(`${parsed.error}\n未写入任何改动；稍后可用 /topics set repo <owner/name> 单独设置。`)
         }
         pending.repo = parsed as string
       }
@@ -625,20 +625,20 @@ export async function runInteractiveOnboard(
     const keys = CONFIG_KEYS.filter((k) => k in pending)
     const confirmAnswers = await panel([{
       id: 'confirm',
-      header: 'llmwiki 配置向导（4/4）',
+      header: 'topics 配置向导（4/4）',
       question: `写入这 ${ops.length} 项配置？（下次会话启动后生效）`,
       detail: [
         ...keys.map((k) => `- ${displayKey(k)} = ${String(pending[k])}`),
         ...(route?.unknownModel === true ? [`- ⚠️ ${route.model} 未通过 ${route.provider} 的模型目录校验（模型目录外，可能仍可用）——已放行，若实际不可用可再改`] : []),
       ].join('\n'),
       options: [
-        { label: '写入', description: '批量写入 settings（llmwiki namespace）' },
+        { label: '写入', description: '批量写入 settings（topics namespace）' },
         { label: '放弃', description: '不写入任何改动' },
       ],
     }])
     const confirmPick = answerFor(confirmAnswers, 'confirm')
     if (!isAnswered(confirmPick) || (confirmPick.selected[0] ?? '').includes('放弃')) {
-      return ok('已放弃，未写入任何改动。随时 /wiki onboard 重新开始。')
+      return ok('已放弃，未写入任何改动。随时 /topics onboard 重新开始。')
     }
     try {
       await mutate(ops)
@@ -649,19 +649,19 @@ export async function runInteractiveOnboard(
     if (pending.repo !== undefined || pending.autoInject !== undefined) service.invalidate()
     return ok(
       [
-        `✅ 已写入 llmwiki 配置（${ops.length} 项）：`,
+        `✅ 已写入 topics 配置（${ops.length} 项）：`,
         ...keys.map((k) => `  ${displayKey(k)} = ${String(pending[k])}`),
         '下次会话启动后生效。',
-        '之后：/wiki status 看健康；/wiki stats 看注入命中；会话里说「记住…」就会沉淀 Topic。',
+        '之后：/topics status 看健康；/topics stats 看注入命中；会话里说「记住…」就会沉淀 Topic。',
       ].join('\n'),
     )
   } catch (error) {
     const code = (error as { code?: string }).code
     if (code === 'ASK_CANCELLED' || code === 'ASK_ABORTED') {
-      return ok('已取消配置向导，未写入任何改动。随时 /wiki onboard 重新开始。')
+      return ok('已取消配置向导，未写入任何改动。随时 /topics onboard 重新开始。')
     }
     if (code === 'ASK_MISSING_AGENT') {
-      return fail('当前 surface 的 ask-user 需要会话上下文，无法从命令发起。请改用 /wiki set，或在 TUI / 浏览器会话里重跑 /wiki onboard。')
+      return fail('当前 surface 的 ask-user 需要会话上下文，无法从命令发起。请改用 /topics set，或在 TUI / 浏览器会话里重跑 /topics onboard。')
     }
     const message = error instanceof Error ? error.message : String(error)
     return fail(`配置向导中断：${message}\n未写入任何改动。`)
@@ -669,9 +669,9 @@ export async function runInteractiveOnboard(
 }
 
 /**
- * The `/wiki onboard <args>` handler. One instance per command registration —
+ * The `/topics onboard <args>` handler. One instance per command registration —
  * wizard state lives in the closure, so tests get a fresh wizard per
- * buildWikiCommand() and concurrent surfaces don't share progress.
+ * buildTopicsCommand() and concurrent surfaces don't share progress.
  *
  * Primary path is the native ask-user seam when BOTH providers are present:
  * `resolveAsk()` (TUI panel, web composer, feishu card — whichever surface
@@ -681,7 +681,7 @@ export async function runInteractiveOnboard(
  * hosts, no UI, no model route — falls back to the typed wizard.
  */
 export function createOnboardHandler(
-  service: WikiService,
+  service: TopicsService,
   mutate: MutateFn,
   detectLogin: GithubLoginDetector = detectGithubLogin,
   resolveAsk: AskServiceResolver = () => undefined,
@@ -699,7 +699,7 @@ export function createOnboardHandler(
   return async (args, invocation) => {
     const input = args.join(' ').trim()
     if (input === '') {
-      // Bare `/wiki onboard` with a live ask-user provider AND a usable llm
+      // Bare `/topics onboard` with a live ask-user provider AND a usable llm
       // directory (first candidate with a non-empty route table) opens the
       // native panel flow; explicit args always mean typed-wizard answers.
       const askService = resolveAsk()
@@ -716,14 +716,14 @@ export function createOnboardHandler(
     }
     if (QUIT.test(input)) {
       state = freshState()
-      return ok('已退出配置向导，未写入任何改动。随时 /wiki onboard 重新开始。')
+      return ok('已退出配置向导，未写入任何改动。随时 /topics onboard 重新开始。')
     }
     if (state.step === 'done') state = freshState()
     if (state.step === 'confirm') {
       const ops = confirmOps(state.pending)
       if (ops.length === 0) {
         state = freshState()
-        return ok('向导结束——本次没有选择任何改动，配置保持原样。随时 /wiki onboard 重新开始。')
+        return ok('向导结束——本次没有选择任何改动，配置保持原样。随时 /topics onboard 重新开始。')
       }
       if (/^a$/i.test(input)) {
         try {
@@ -737,16 +737,16 @@ export function createOnboardHandler(
         state = freshState()
         return ok(
           [
-            `✅ 已写入 llmwiki 配置（${ops.length} 项）：`,
+            `✅ 已写入 topics 配置（${ops.length} 项）：`,
             ...keys,
             '下次会话启动后生效。',
-            '之后：/wiki status 看健康；/wiki stats 看注入命中；会话里说「记住…」就会沉淀 Topic。',
+            '之后：/topics status 看健康；/topics stats 看注入命中；会话里说「记住…」就会沉淀 Topic。',
           ].join('\n'),
         )
       }
       if (/^b$/i.test(input)) {
         state = freshState()
-        return ok('已放弃，未写入任何改动。随时 /wiki onboard 重新开始。')
+        return ok('已放弃，未写入任何改动。随时 /topics onboard 重新开始。')
       }
       return fail(`确认页只认 a（写入）或 b（放弃）。\n\n${renderStep(state, service.cfg)}`)
     }
@@ -755,7 +755,7 @@ export function createOnboardHandler(
       if (login === undefined) {
         return fail('探测 gh 登录名失败（gh 未登录或不可用）。直接输入 owner/name，或回复 c 跳过。')
       }
-      return advance(`${login}/${DEFAULT_WIKI_REPO}`)
+      return advance(`${login}/${DEFAULT_TOPICS_REPO}`)
     }
     return advance(input)
   }

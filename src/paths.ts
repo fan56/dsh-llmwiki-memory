@@ -1,6 +1,6 @@
 /**
  * Path resolution for the local bundle (ADR 0008): the Cache lives at
- * `~/.dsh/llmwiki/` (override with $DSH_LLMWIKI_HOME for tests), laid out as
+ * `~/.dsh/topics/` (override with $DSH_TOPICS_HOME for tests), laid out as
  * an OKF bundle:
  *
  *   <root>/topics/<slug>.md      concept documents
@@ -12,6 +12,7 @@
  * @module paths
  */
 
+import { existsSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { hostname as osHostname } from 'node:os'
 import { join } from 'node:path'
@@ -23,9 +24,30 @@ export function resolveDshHome(): string {
 }
 
 export function resolveBundleRoot(): string {
-  const env = process.env.DSH_LLMWIKI_HOME?.trim()
+  const env = process.env.DSH_TOPICS_HOME?.trim()
   if (env !== undefined && env !== '') return env
-  return join(resolveDshHome(), 'llmwiki')
+  const dshHome = resolveDshHome()
+  return migrateLegacyBundleRoot(join(dshHome, 'topics'), join(dshHome, 'llmwiki'))
+}
+
+/**
+ * One-time migration from the pre-rename data location (`~/.dsh/llmwiki` to
+ * `~/.dsh/topics`, ADR 0013). Constraints:
+ * - one-time: fires only while the new directory is absent and the legacy one
+ *   exists; after the rename (or a fresh bundle on the new path) the check is
+ *   a no-op;
+ * - fail-open: any rename error falls back to the legacy path so the plugin
+ *   keeps serving the old bundle instead of booting an empty new one;
+ * - bypassed entirely by an explicit $DSH_TOPICS_HOME (test/CI isolation).
+ */
+export function migrateLegacyBundleRoot(next: string, legacy: string): string {
+  if (existsSync(next) || !existsSync(legacy)) return next
+  try {
+    renameSync(legacy, next)
+    return next
+  } catch {
+    return legacy
+  }
 }
 
 export function topicsDir(root: string): string {
@@ -63,5 +85,5 @@ export function hostId(): string {
 
 /** The actor string stamped into `generated.by` for machine-written topics. */
 export function actorFor(): string {
-  return `agent:dsh-llmwiki-memory@${hostId()}`
+  return `agent:dsh-topics-memory@${hostId()}`
 }

@@ -1,6 +1,6 @@
 {
-  "name": "@aiwayds/dsh-llmwiki-memory",
-  "version": "0.3.0",
+  "name": "@aiwayds/dsh-topics-memory",
+  "version": "0.6.0",
   "description": "dsh-plugin: OKF v0.2 topic memory for dsh - local-first git-tracked bundle, hot-path LLM-free injection, two-stage observer with background distill",
   "type": "module",
   "main": "lib/index.js",
@@ -10,7 +10,7 @@
     "dsh",
     "dsh-plugin",
     "plugin",
-    "llm-wiki",
+    "topic-memory",
     "okf",
     "open-knowledge-format",
     "memory",
@@ -18,9 +18,9 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fan56/dsh-llmwiki-memory.git"
+    "url": "git+https://github.com/fan56/dsh-topics-memory.git"
   },
-  "homepage": "https://github.com/fan56/dsh-llmwiki-memory",
+  "homepage": "https://github.com/fan56/dsh-topics-memory",
   "engines": {
     "node": ">=22.19.0"
   },
@@ -38,7 +38,7 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
     "pretest": "tsc -p tsconfig.json",
-    "test": "node --test test/yaml.test.mjs test/okf.test.mjs test/retrieval.test.mjs test/digest.test.mjs test/ilog.test.mjs test/store.test.mjs test/git.test.mjs test/sync.test.mjs test/tools.test.mjs test/dedup.test.mjs test/commands.test.mjs test/onboard.test.mjs test/delegation.test.mjs test/observer.test.mjs test/distill.test.mjs test/viz.test.mjs test/corpus.test.mjs test/llm-scope.test.mjs"
+    "test": "node --test test/yaml.test.mjs test/okf.test.mjs test/retrieval.test.mjs test/digest.test.mjs test/ilog.test.mjs test/store.test.mjs test/paths.test.mjs test/git.test.mjs test/sync.test.mjs test/tools.test.mjs test/dedup.test.mjs test/commands.test.mjs test/onboard.test.mjs test/delegation.test.mjs test/observer.test.mjs test/distill.test.mjs test/viz.test.mjs test/corpus.test.mjs test/llm-scope.test.mjs test/settings-migration.test.mjs"
   },
   "dependencies": {},
   "peerDependencies": {
