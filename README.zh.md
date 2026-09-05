@@ -58,6 +58,24 @@ Bundle 默认在 `~/.dsh/topics/`（`$DSH_TOPICS_HOME` 可覆盖）。装好后�
 2. 跑 `/topics onboard`，在 ask-user 面板里走完 模式 / 仓库 / 蒸馏模型 / 注入档位 / 自动观察 五个决定——末步确认才写入；
 3. 正常干活：相关结论每轮自动注入；说「记住…」让模型 `topic_save`；`/topics status` 看健康，`/topics stats` 看注入命中。
 
+## 卸载
+
+从 profile 移除插件：
+
+```sh
+dsh plugin --profile <name> remove @aiwayds/dsh-topics-memory
+```
+
+宿主会自动收敛：`dsh.profile.bundles` 条目被移除，patch 层随包消失。
+
+以下内容有意保留在磁盘上（这是你的记忆本体）：
+
+- `~/.dsh/topics/` —— 整个话题包：话题 markdown、`meta/`、以及内嵌的 `.git` 仓库（完整历史；可能带有 `origin` 远端 —— GitHub 同步随插件停止）。要异地归档就原样拷贝/克隆这个目录。
+- `~/.dsh/settings.yaml` 的 `topics:` 段 —— 用户覆盖项。注意：重装会静默恢复同步（包括已配置的 `repo`）；想干净重来就先删这一段。
+- 0.5.x → 0.6.x 迁移留下的 `llmwiki:` 旧设置段不会被自动删除；确认无用后手动移除。
+
+彻底清除：先备份 `~/.dsh/topics`，再 `rm -rf ~/.dsh/topics`。
+
 ## 配置
 
 首次配置交给 `/topics onboard`；日常微调用 `/topics set <key> <value>`（写 `settings.yaml` 的 `topics` namespace，下次会话启动生效）。全部键与默认值：

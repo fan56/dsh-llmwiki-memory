@@ -535,8 +535,14 @@ export function apply(ctx: Context): void {
           observer.onSessionEvent('dispose', 'agent/disposed', undefined)
         }
         sync.dispose()
-        void sync.commitMeta().then(() => sync.flush()).catch(() => undefined)
-        return settleBounded(exitDistill, EXIT_DISTILL_TIMEOUT_MS)
+        // The exit flush (final meta commit + ledger flush) rides the SAME
+        // bounded window as the exit distill — fire-and-forget here loses the
+        // exit race that window was built to win.
+        const exitFlush = sync.commitMeta().then(() => sync.flush()).catch(() => undefined)
+        return settleBounded(
+          exitDistill === undefined ? exitFlush : Promise.allSettled([exitDistill, exitFlush]),
+          EXIT_DISTILL_TIMEOUT_MS,
+        )
       }
     },
     'topics: lifecycle',

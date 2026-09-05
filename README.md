@@ -58,6 +58,24 @@ First thing after installing: run `/topics onboard`. The bundle lives at `~/.dsh
 
 0.6.0 renames the plugin: `@aiwayds/dsh-llmwiki-memory` → `@aiwayds/dsh-topics-memory`, the `/wiki` command family → `/topics`, and the settings namespace `llmwiki` → `topics`. Install the new package (and remove the old one from your profile) — on first start the plugin migrates everything automatically: the data directory `~/.dsh/llmwiki` is renamed to `~/.dsh/topics`, and user-tuned values in the old `llmwiki` settings namespace are copied into `topics`. No manual steps; if a migration step fails the plugin falls back to the old locations and keeps working.
 
+## Uninstall
+
+Remove the plugin from a profile:
+
+```sh
+dsh plugin --profile <name> remove @aiwayds/dsh-topics-memory
+```
+
+The host reconciles the profile automatically: the `dsh.profile.bundles` entry is spliced and the patch layer is dropped.
+
+What stays on disk (kept on purpose — this is your memory):
+
+- `~/.dsh/topics/` — the whole topic bundle: topic markdown, `meta/`, and the embedded `.git` repo (the full history; it may carry an `origin` remote — GitHub sync stops with the plugin). To archive the bundle elsewhere, copy or clone this directory as-is.
+- `~/.dsh/settings.yaml` `topics:` section — user overrides. Reinstalling silently reactivates sync including any configured `repo`; delete the section first if you want a clean start.
+- The legacy `llmwiki:` settings section left by the 0.5.x → 0.6.x migration is never auto-deleted; remove it by hand once nothing needs it.
+
+Purge everything: back up `~/.dsh/topics` first, then `rm -rf ~/.dsh/topics`.
+
 ## Configuration
 
 First-time setup belongs to `/topics onboard`; day-to-day tuning is `/topics set <key> <value>` (writes the `topics` namespace in `settings.yaml`, effective from the next session). All keys and defaults:

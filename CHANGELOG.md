@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.1 (2026-09-05)
+
+- 退出 flush 纳入有界窗口：卸载时的最终 meta 提交 + 账本 flush 此前是 fire-and-forget，会输给它本要赢的退出竞态；现在与退出蒸馏共享同一个 `settleBounded` 窗口。
+- 干净卸载：两份 README 增加「卸载」节（移除命令 + `~/.dsh/topics` / settings 残留清单），boot smoke 增加卸载腿（`dsh plugin remove` 后断言组合树还原），并补上缺失的 `smoke` npm script。
+
 ## 0.8.0 (2026-09-03)
 
 - 依赖整体迁到 dsh rc/stable 线（0.1.2-rc.1 闭合，alpha 线退役）：peerDependencies 地板 `dsh-tools`/`dsh-llm`/`dsh-settings`/`dsh-commands`/`dsh-util-values` 由 `>=0.1.2-alpha.4` 提到 `>=0.1.2-rc.1`；devDependencies 15 个 `@deepseek-ai/dsh-*` 精确钉版 `0.1.2-alpha.4` → `0.1.2-rc.1`（cordis/schemastery 不动）。CI 与 release 的 dsh 闭包改为运行时解析 `latest`/`next` 中更新者、永不 `@alpha`（该迁移已在 0.7.0 前的 main 上先行落地，此处一并归档说明）。
